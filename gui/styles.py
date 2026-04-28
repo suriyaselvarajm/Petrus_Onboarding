@@ -10,10 +10,17 @@ from tkinter import ttk
 C = {
     "bg":          "#F0F4F8",   # Light grey-blue background
     "surface":     "#FFFFFF",   # Card / panel surface (white)
+<<<<<<< Updated upstream
     "surface2":    "#E8EDF2",   # Secondary surface (slightly darker)
     "border":      "#CBD5E1",   # Borders
     "accent":      "#2563EB",   # Primary blue (vivid)
     "accent_h":    "#1D4ED8",   # Accent hover (deeper blue)
+=======
+    "surface2":    "#E8EDF2",   # Secondary surface
+    "border":      "#CBD5E1",   # Borders
+    "accent":      "#2563EB",   # Primary blue (vivid)
+    "accent_h":    "#1D4ED8",   # Accent hover
+>>>>>>> Stashed changes
     "accent_dim":  "#DBEAFE",   # Light accent fill
     "success":     "#16A34A",   # Green
     "error":       "#DC2626",   # Red
@@ -21,7 +28,11 @@ C = {
     "text":        "#1E293B",   # Primary text (dark slate)
     "text_muted":  "#64748B",   # Secondary text
     "text_dim":    "#94A3B8",   # Dimmed text
+<<<<<<< Updated upstream
     "input_bg":    "#F8FAFC",   # Input background (very light)
+=======
+    "input_bg":    "#F8FAFC",   # Input background
+>>>>>>> Stashed changes
     "highlight":   "#BFDBFE",   # Selection highlight
 }
 

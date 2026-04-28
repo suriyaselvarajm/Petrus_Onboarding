@@ -41,12 +41,26 @@ class _ScrollableFrame(tk.Frame):
         canvas.configure(yscrollcommand=vsb.set)
         canvas.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
+<<<<<<< Updated upstream
 
         # Mouse-wheel scrolling — only scroll the canvas when the
         # cursor is actually over the canvas, NOT over a Combobox,
         # Listbox, or other scrollable widget.  This prevents the
         # bug where scrolling the page changes Combobox / OU values.
+=======
+        # Mouse-wheel scrolling — skip when cursor is over a Combobox or Listbox
+>>>>>>> Stashed changes
         self._canvas = canvas
+        def _on_mousewheel(event):
+            try:
+                w = event.widget.winfo_containing(event.x_root, event.y_root)
+            except Exception:
+                w = event.widget
+            wc = getattr(w, "winfo_class", lambda: "")() if w else ""
+            if wc in ("TCombobox", "Listbox", "TSpinbox", "Spinbox"):
+                return
+            canvas.yview_scroll(-1 * (event.delta // 120), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         def _on_mousewheel(event):
             # Get the widget directly under the cursor
@@ -408,7 +422,7 @@ class UserForm(tk.Frame):
                                    selectbackground=C["accent"],
                                    selectforeground="white",
                                    font=F["body"], relief="flat",
-                                   activestyle="none", bd=0)
+                                   activestyle="none", bd=0, exportselection=False)
         grp_vsb = ttk.Scrollbar(lb_frame, command=self._grp_lb.yview)
         self._grp_lb.configure(yscrollcommand=grp_vsb.set)
         self._grp_lb.grid(row=0, column=0, sticky="ew")
@@ -471,7 +485,7 @@ class UserForm(tk.Frame):
                                       selectbackground=C["accent"],
                                       selectforeground="white",
                                       font=F["body"], relief="flat",
-                                      activestyle="none", bd=0)
+                                      activestyle="none", bd=0, exportselection=False)
         ad_vsb = ttk.Scrollbar(lb_frame, command=self._ad_grp_lb.yview)
         self._ad_grp_lb.configure(yscrollcommand=ad_vsb.set)
         self._ad_grp_lb.grid(row=0, column=0, sticky="ew")
@@ -577,8 +591,17 @@ class UserForm(tk.Frame):
             self._reload_ad_groups(None)
 
     def _populate_ous(self):
-        names = [n for n, _ in self._all_ad_ous]
+        names = []
+        for name, dn in self._all_ad_ous:
+            # Parse DistinguishedName to create a hierarchical path, e.g., Coimbatore \ Electrical
+            parts = [p for p in dn.split(',') if p.upper().startswith('OU=')]
+            ous = [p.split('=')[1] for p in reversed(parts)]
+            # Drop the root 'Petrus-Users' if it's there, to keep names clean
+            ous = [ou for ou in ous if ou.lower() != 'petrus-users']
+            names.append(" \\ ".join(ous) if ous else name)
+            
         if not names:
+            from config import AD_PETRUS_USERS_OU
             names = [f"Petrus Users (default — {AD_PETRUS_USERS_OU})"]
         self._ou_cb.configure(values=names)
         self._ou_cb.current(0)
@@ -670,25 +693,36 @@ class UserForm(tk.Frame):
             self._mgr_combo.current(0)
 
     def _fetch_licenses(self):
+        from config import LICENSE_SKU_MAP
         skus = self.o365.get_license_skus()
         sku_map = {}
         for sku in skus:
             part   = sku.get("skuPartNumber", "").upper()
             sku_id = sku.get("skuId", "")
+<<<<<<< Updated upstream
             # Match ONLY O365/M365 Business SKUs — be very specific
             # to avoid matching POWER_BI_STANDARD or other unrelated SKUs
+=======
+>>>>>>> Stashed changes
             if part in ("O365_BUSINESS_ESSENTIALS", "SMB_BUSINESS_ESSENTIALS",
                         "M365_BUSINESS_BASIC"):
                 sku_map["Microsoft 365 Business Basic"] = sku_id
             elif part in ("O365_BUSINESS_PREMIUM", "SMB_BUSINESS_PREMIUM",
                           "M365_BUSINESS_STANDARD", "SPB"):
                 sku_map["Microsoft 365 Business Standard"] = sku_id
+<<<<<<< Updated upstream
 
         # Fall back to hardcoded SKU IDs for any that weren't matched
         for name, fallback_id in LICENSE_SKU_MAP.items():
             if name not in sku_map:
                 sku_map[name] = fallback_id
 
+=======
+        # Fallback to hardcoded SKU IDs
+        for name, fallback_id in LICENSE_SKU_MAP.items():
+            if name not in sku_map:
+                sku_map[name] = fallback_id
+>>>>>>> Stashed changes
         self._license_skus = sku_map
         self.after(0, lambda: self._license_hint.configure(
             text=f"{len(skus)} SKU(s) loaded from tenant",
@@ -928,6 +962,7 @@ class UserForm(tk.Frame):
         threading.Thread(target=self._run_creation, args=(data,), daemon=True).start()
 
     def _run_creation(self, data: Dict[str, Any]):
+        from config import LICENSE_SKU_MAP, MAILBOX_WAIT_SECONDS
         log: List[Tuple[bool, str]] = []
 
         def step(ok: bool, msg: str):
@@ -945,6 +980,7 @@ class UserForm(tk.Frame):
             return
         step(ok, f"O365 user created ({user_id[:8]}…)")
 
+<<<<<<< Updated upstream
         # ── 1b. Wait for Azure AD replication ────────────────────────────────
         step(True, "⏳ Waiting for Azure AD replication (up to 60 s)…")
         prov_ok, prov_msg = self.o365.wait_for_user_provisioned(user_id, max_wait=60)
@@ -967,24 +1003,52 @@ class UserForm(tk.Frame):
             step(True, "Assigning license (retrying if needed)…")
             lic_ok, m2 = self.o365.assign_license(user_id, sku_id)
             step(lic_ok, f"License: {m2}")
-        else:
-            step(False, f"License SKU for '{data['license_name']}' not found in tenant — assign manually")
+=======
+        # ── 1b. Wait for replication ──────────────────────────────────────────
+        step(True, "⏳ Waiting for Azure AD replication (up to 60 s)…")
+        rep_ok, rep_msg = self.o365.wait_for_replication(user_id)
+        step(rep_ok, rep_msg)
 
+        # ── 1c. Set mail address ──────────────────────────────────────────────
+        mail_ok, mail_msg = self.o365.set_mail_address(user_id, data["email"])
+        step(mail_ok, f"Azure AD mail: {mail_msg}")
+
+        # ── 2. Assign license ─────────────────────────────────────────────────
+        sku_id = data.get("license_sku_id")
+        if not sku_id:
+            sku_id = LICENSE_SKU_MAP.get(data.get("license_name", ""))
+        if sku_id:
+            step(True, "Assigning license (retrying if needed)…")
+            ok2, m2 = self.o365.assign_license(user_id, sku_id)
+            step(ok2, f"License: {m2}")
+>>>>>>> Stashed changes
+        else:
+            step(False, f"License SKU for '{data['license_name']}' not found — assign manually")
+
+<<<<<<< Updated upstream
         # ── 2b. Wait for Exchange mailbox provisioning ────────────────────────
         # Groups and aliases in O365 require an active Exchange mailbox.
         # The mailbox only becomes live AFTER the license is applied.
+=======
+        # ── 2b. Wait for Exchange mailbox ─────────────────────────────────────
+>>>>>>> Stashed changes
         step(True, f"⏳ Waiting for Exchange Online mailbox (up to {MAILBOX_WAIT_SECONDS}s)…")
         mbx_ok, mbx_msg = self.o365.wait_for_mailbox(user_id, max_wait=MAILBOX_WAIT_SECONDS)
         if mbx_ok:
             step(True, "Exchange mailbox ready ✔")
         else:
+<<<<<<< Updated upstream
             step(False, f"{mbx_msg}  — will retry after AD creation")
+=======
+            step(False, f"{mbx_msg} — will retry after AD creation")
+>>>>>>> Stashed changes
 
         # ── 3. Manager ────────────────────────────────────────────────────────
         if data.get("manager_id"):
             ok4, m4 = self.o365.set_manager(user_id, data["manager_id"])
             step(ok4, f"Manager: {m4}")
 
+<<<<<<< Updated upstream
         # ── 4. First attempt: Alias, Groups ──────────────────────────────────
         # Track failures for retry after AD creation
         retry_alias   = False
@@ -998,13 +1062,28 @@ class UserForm(tk.Frame):
             step(True, "ℹ MFA: Please enable MFA manually in Azure portal → Users → Per-user MFA")
 
         # 4b. O365 Alias (employeeID@domain)
+=======
+        # ── 4. MFA (skipped — enable manually) ───────────────────────────────
+        if data.get("enable_mfa"):
+            step(True, "ℹ MFA: Please enable manually in Azure portal → Users → Per-user MFA")
+
+        # ── 5. O365 Alias + Groups (first attempt) ───────────────────────────
+        retry_alias  = False
+        retry_groups = []
+        emp_id     = data.get("employee_id", "")
+        o365_alias = f"{emp_id}@{data['email'].split('@')[1]}" if emp_id and "@" in data["email"] else ""
+
+>>>>>>> Stashed changes
         if o365_alias:
             al_ok, al_msg = self.o365.add_o365_alias(user_id, o365_alias)
             step(al_ok, f"O365 alias: {al_msg}")
             if not al_ok:
                 retry_alias = True
 
+<<<<<<< Updated upstream
         # 4c. O365 Groups
+=======
+>>>>>>> Stashed changes
         for gid, gname in data.get("o365_groups", []):
             ok5, m5 = self.o365.add_to_group(user_id, gid)
             step(ok5, f"O365 group '{gname}': {m5}")
@@ -1015,30 +1094,46 @@ class UserForm(tk.Frame):
         ok6, m6 = self.o365.add_to_zoho_enterprise_app(user_id)
         step(ok6, f"Zoho Accounts: {m6}")
 
+<<<<<<< Updated upstream
         # ── 5. Create AD user ─────────────────────────────────────────────────
+=======
+        # ── 7. Create AD user (UNTOUCHED) ─────────────────────────────────────
+>>>>>>> Stashed changes
         step(True, "Creating Active Directory user…")
         if data.get("manager_upn"):
             data["ad_manager_dn"] = self.ad.get_manager_dn(data["manager_upn"]) or ""
         ok7, result7 = self.ad.create_user(data)
         if not ok7:
             step(False, f"AD creation error: {result7}")
+<<<<<<< Updated upstream
             # Don't return — continue with retries even if AD fails
+=======
+>>>>>>> Stashed changes
             sam = None
         else:
             sam = result7
             step(ok7, f"AD user created: {sam}")
 
+<<<<<<< Updated upstream
         # ── 6. AD Proxy addresses ────────────────────────────────────────────
+=======
+        # ── 8. AD Proxy addresses (UNTOUCHED) ────────────────────────────────
+>>>>>>> Stashed changes
         if sam and emp_id:
             ok8, m8 = self.ad.set_proxy_addresses(sam, data["email"], emp_id)
             step(ok8, f"AD Proxy addresses: {m8 or 'Set'}")
 
+<<<<<<< Updated upstream
         # ── 7. AD groups ──────────────────────────────────────────────────────
+=======
+        # ── 9. AD groups (UNTOUCHED) ──────────────────────────────────────────
+>>>>>>> Stashed changes
         if sam:
             for gname, gdn in data.get("ad_groups", []):
                 ok9, m9 = self.ad.add_to_group(sam, gdn)
                 step(ok9, f"AD group '{gname}': {m9 or 'OK'}")
 
+<<<<<<< Updated upstream
         # ══════════════════════════════════════════════════════════════════════
         # ── 8. RETRY failed O365 operations ──────────────────────────────────
         # By now, more time has passed since license assignment (AD creation
@@ -1067,6 +1162,24 @@ class UserForm(tk.Frame):
                 for gid, gname in retry_groups:
                     ok5r, m5r = self.o365.add_to_group(user_id, gid)
                     step(ok5r, f"Group retry '{gname}': {m5r}")
+=======
+        # ── 10. RETRY failed O365 operations after AD creation ────────────────
+        if retry_alias or retry_groups:
+            step(True, "")
+            step(True, "═══ Retrying failed O365 operations after AD creation ═══")
+            if not mbx_ok:
+                step(True, "⏳ Re-checking Exchange mailbox…")
+                mbx_ok, _ = self.o365.wait_for_mailbox(user_id, max_wait=60)
+                step(mbx_ok, f"Mailbox: {'ready ✔' if mbx_ok else 'still not ready'}")
+
+            if retry_alias and o365_alias:
+                al2_ok, al2_msg = self.o365.add_o365_alias(user_id, o365_alias)
+                step(al2_ok, f"Alias retry: {al2_msg}")
+
+            for gid, gname in retry_groups:
+                ok5r, m5r = self.o365.add_to_group(user_id, gid)
+                step(ok5r, f"Group retry '{gname}': {m5r}")
+>>>>>>> Stashed changes
 
         self.after(0, lambda: self._done(
             True, f"User '{data['email']}' created in O365 & AD!", log))

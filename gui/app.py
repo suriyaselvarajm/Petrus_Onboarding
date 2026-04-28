@@ -15,8 +15,11 @@ from core.o365_service import O365Service
 from core.ad_service import ADService
 from core.connection_manager import ConnectionManager, ConnectionStatus
 
+<<<<<<< Updated upstream
 # Path to company logo — set this to your logo file (PNG/GIF).
 # Place the logo in the project root or adjust the path.
+=======
+>>>>>>> Stashed changes
 import os
 LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logo.png")
 
@@ -49,7 +52,11 @@ class OnboardingApp:
         self._form: tk.Widget = None
         self._loading_lbl: tk.Label = None
         self._form_shown = False
+<<<<<<< Updated upstream
         self._logo_img = None    # keep reference to prevent GC
+=======
+        self._logo_img = None    # prevent GC
+>>>>>>> Stashed changes
 
         self._build_ui()
         self._start_checks()
@@ -100,17 +107,24 @@ class OnboardingApp:
                 tk.Label(bar, image=self._logo_img, bg=C["surface"]
                          ).pack(side="left", padx=(18, 8), pady=8)
             except ImportError:
+<<<<<<< Updated upstream
                 # Pillow not installed — try native PhotoImage (GIF/PGM only)
                 try:
                     self._logo_img = tk.PhotoImage(file=LOGO_PATH)
                     # Subsample if too large
                     w, h = self._logo_img.width(), self._logo_img.height()
+=======
+                try:
+                    self._logo_img = tk.PhotoImage(file=LOGO_PATH)
+                    w = self._logo_img.width()
+>>>>>>> Stashed changes
                     if w > 48:
                         factor = max(1, w // 44)
                         self._logo_img = self._logo_img.subsample(factor, factor)
                     tk.Label(bar, image=self._logo_img, bg=C["surface"]
                              ).pack(side="left", padx=(18, 8), pady=8)
                 except Exception:
+<<<<<<< Updated upstream
                     tk.Label(bar, text="🏢",
                              bg=C["surface"], font=("Segoe UI Emoji", 22)
                              ).pack(side="left", padx=(18, 4), pady=10)
@@ -120,6 +134,17 @@ class OnboardingApp:
                      ).pack(side="left", padx=(18, 4), pady=10)
 
         # ── Company Name ──────────────────────────────────────────────────
+=======
+                    tk.Label(bar, text="🏢", bg=C["surface"],
+                             font=("Segoe UI Emoji", 22)
+                             ).pack(side="left", padx=(18, 4), pady=10)
+        else:
+            tk.Label(bar, text="🏢", bg=C["surface"],
+                     font=("Segoe UI Emoji", 22)
+                     ).pack(side="left", padx=(18, 4), pady=10)
+
+        # ── Company Name (from config.py COMPANY_NAME) ────────────────────
+>>>>>>> Stashed changes
         tk.Label(bar, text=COMPANY_NAME.upper(),
                  bg=C["surface"], fg=C["accent"],
                  font=("Segoe UI", 14, "bold")
