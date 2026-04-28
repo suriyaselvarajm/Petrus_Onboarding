@@ -57,6 +57,7 @@ EMPLOYEE_TYPES = [
     "Intern",
 ]
 
+<<<<<<< Updated upstream
 # ── Enterprise Apps ───────────────────────────────────────────────────────────
 ZOHO_APP_NAME      = "Zoho Accounts"
 ZOHO_APP_OBJECT_ID = "62935978-85f5-4b19-af58-0101be6d8bcc"   # Azure Enterprise App Object ID
@@ -64,3 +65,20 @@ ZOHO_APP_OBJECT_ID = "62935978-85f5-4b19-af58-0101be6d8bcc"   # Azure Enterprise
 # ── Connection Polling ────────────────────────────────────────────────────────
 CONNECTION_POLL_INTERVAL  = 60      # seconds between connection re-checks
 MAILBOX_WAIT_SECONDS     = 120     # seconds to wait for Exchange mailbox provisioning
+=======
+# ── Zoho Enterprise Application ───────────────────────────────────────────────
+ZOHO_APP_NAME      = "Zoho Accounts"
+ZOHO_APP_OBJECT_ID = "62935978-85f5-4b19-af58-0101be6d8bcc"   # Azure Enterprise App Object ID
+
+# ── License SKU Mapping (fallback) ────────────────────────────────────────────
+# Used when dynamic fetch from tenant doesn't match by partNumber.
+# Get these from: GET /subscribedSkus  or  Get-MsolAccountSku
+LICENSE_SKU_MAP = {
+    "Microsoft 365 Business Basic":    "3b555118-da6a-4418-894f-7df1e2096870",   # O365_BUSINESS_ESSENTIALS
+    "Microsoft 365 Business Standard": "f245ecc8-75af-4f8e-b61f-27d8114de5f3",   # O365_BUSINESS_PREMIUM
+}
+
+# ── Connection Polling ─────────────────────────────────────────────────────────
+CONNECTION_POLL_INTERVAL = 60    # seconds
+MAILBOX_WAIT_SECONDS    = 120   # seconds to wait for Exchange mailbox provisioning
+>>>>>>> Stashed changes

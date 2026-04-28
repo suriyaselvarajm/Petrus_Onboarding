@@ -13,8 +13,13 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from config import (
     GRAPH_BASE, GRAPH_BETA, GRAPH_RESOURCE,
+<<<<<<< Updated upstream
     ZOHO_APP_NAME, EMAIL_DOMAIN, COMPANY_NAME,
     LICENSE_SKU_MAP, ZOHO_APP_OBJECT_ID,
+=======
+    ZOHO_APP_NAME, ZOHO_APP_OBJECT_ID,
+    EMAIL_DOMAIN, COMPANY_NAME,
+>>>>>>> Stashed changes
 )
 
 
@@ -148,6 +153,7 @@ class O365Service:
                 if r.status_code == 200:
                     data = r.json()
                     for g in data.get("value", []):
+<<<<<<< Updated upstream
                         # Tag each group with its type for display
                         is_unified  = "Unified" in g.get("groupTypes", [])
                         is_mail     = g.get("mailEnabled", False)
@@ -166,6 +172,12 @@ class O365Service:
                         if is_synced:
                             g["_type"] += " (AD Synced)"
 
+=======
+                        # Skip groups synced from local AD (they cannot be modified in O365)
+                        if g.get("onPremisesSyncEnabled"):
+                            continue
+                        # Allow Mail-Enabled Security Groups / Distribution Lists to be listed
+>>>>>>> Stashed changes
                         groups.append(g)
                     url = data.get("@odata.nextLink")
                 else:
@@ -228,8 +240,11 @@ class O365Service:
             "surname":          last,
             "userPrincipalName": email,
             "mailNickname":     data.get("mail_nickname", sam[:48]),
+<<<<<<< Updated upstream
             # NOTE: proxyAddresses is read-only via Graph API on user creation.
             # Proxy addresses (SMTP primary + smtp:empID alias) are set in AD only.
+=======
+>>>>>>> Stashed changes
             "passwordProfile": {
                 "forceChangePasswordNextSignIn": data.get("force_change_pwd", True),
                 "password": data.get("password", "Welcome@123"),
@@ -268,6 +283,7 @@ class O365Service:
 
     # ── Post-Creation Steps ───────────────────────────────────────────────────
 
+<<<<<<< Updated upstream
     def wait_for_user_provisioned(self, user_id: str,
                                   max_wait: int = 60) -> Tuple[bool, str]:
         """
@@ -405,9 +421,25 @@ class O365Service:
             )
             if r.status_code in (200, 204):
                 return True, "Per-user MFA enabled (Graph API)"
+=======
+    def assign_license(self, user_id: str, sku_id: str) -> Tuple[bool, str]:
+        """
+        Assign a license robustly:
+          1. PATCH usageLocation first (required before assignLicense).
+          2. Retry up to 4× with exponential back-off.
+          3. Fall back to UPN if object-ID keeps failing.
+        """
+        # Ensure usageLocation is set
+        try:
+            self._patch(f"{GRAPH_BASE}/users/{user_id}",
+                        {"usageLocation": "IN"})
+>>>>>>> Stashed changes
         except Exception:
             pass
+        import time as _t
+        _t.sleep(3)
 
+<<<<<<< Updated upstream
         # ── Method 2: legacy strongAuthenticationRequirements ─────────────────
         try:
             r2 = self._patch(
@@ -522,6 +554,53 @@ class O365Service:
             return False, f"mail PATCH failed: {err}"
         except Exception as e:
             return False, str(e)
+=======
+        body   = {"addLicenses": [{"skuId": sku_id}], "removeLicenses": []}
+        delays = [8, 20, 35, 50]
+        last_err = ""
+        upn = None
+
+        for i, delay in enumerate([0] + delays):
+            if delay:
+                _t.sleep(delay)
+            # Fall back to UPN after 2 tries
+            if i >= 2 and upn is None:
+                try:
+                    r0 = self._get(f"{GRAPH_BASE}/users/{user_id}?$select=userPrincipalName")
+                    if r0.status_code == 200:
+                        upn = r0.json().get("userPrincipalName")
+                except Exception:
+                    pass
+            identifier = upn if (i >= 2 and upn) else user_id
+            try:
+                r = self._post(f"{GRAPH_BASE}/users/{identifier}/assignLicense", body)
+                if r.status_code == 200:
+                    tag = f" (attempt {i+1})" if i else ""
+                    return True, f"License assigned{tag}"
+                err_body = {}
+                try:
+                    err_body = r.json()
+                except Exception:
+                    pass
+                last_err = err_body.get("error", {}).get("message", r.text[:200])
+                if any(x in last_err.lower() for x in
+                       ("already", "authorization", "forbidden",
+                        "does not exist", "invalid")):
+                    break
+            except Exception as e:
+                last_err = str(e)
+        return False, f"License failed after {len(delays)+1} attempts: {last_err}"
+
+    def enable_mfa(self, user_id: str) -> Tuple[bool, str]:
+        """
+        MFA cannot be reliably enabled via Graph API on this tenant.
+        Returns an informational message — MFA should be enabled manually.
+        """
+        return True, (
+            "ℹ Please enable MFA manually in Azure portal → "
+            "Users → Per-user MFA"
+        )
+>>>>>>> Stashed changes
 
     def set_proxy_addresses(self, user_id: str, email: str,
                              employee_id: str = "") -> Tuple[bool, str]:
@@ -759,6 +838,7 @@ class O365Service:
                         sp = r.json()
                 except Exception:
                     pass
+<<<<<<< Updated upstream
 
             # Fall back to search by name
             if not sp:
@@ -776,6 +856,29 @@ class O365Service:
                 (ar["id"] for ar in app_roles if ar.get("isEnabled", True)),
                 "00000000-0000-0000-0000-000000000000"
             )
+=======
+
+            # Fall back to search by name
+            if not sp:
+                r = self._get(
+                    f"{GRAPH_BASE}/servicePrincipals",
+                    params={
+                        "$filter": f"displayName eq '{ZOHO_APP_NAME}'",
+                        "$select": "id,displayName,appRoles",
+                    },
+                )
+                if r.status_code == 200:
+                    sps = r.json().get("value", [])
+                    if sps:
+                        sp = sps[0]
+
+            if not sp:
+                return False, f"Enterprise app '{ZOHO_APP_NAME}' not found in tenant"
+
+            sp_id = sp["id"]
+            app_roles = sp.get("appRoles", [])
+            role_id = app_roles[0]["id"] if app_roles else "00000000-0000-0000-0000-000000000000"
+>>>>>>> Stashed changes
 
             body = {
                 "principalId": user_id,
@@ -784,9 +887,92 @@ class O365Service:
             }
             r2 = self._post(f"{GRAPH_BASE}/users/{user_id}/appRoleAssignments", body)
             if r2.status_code in (200, 201):
+<<<<<<< Updated upstream
                 return True, f"User added to '{sp.get('displayName','Zoho Accounts')}' enterprise app"
+=======
+                return True, f"User added to '{sp.get('displayName', 'Zoho Accounts')}' enterprise app"
+>>>>>>> Stashed changes
             if r2.status_code == 409:
                 return True, "Already assigned to Zoho Accounts"
             return False, r2.text[:200]
+        except Exception as e:
+            return False, str(e)
+
+    def wait_for_replication(self, user_id: str, max_wait: int = 60) -> Tuple[bool, str]:
+        """Poll until the new user is visible in Graph."""
+        import time as _t
+        for _ in range(max_wait // 5):
+            try:
+                r = self._get(f"{GRAPH_BASE}/users/{user_id}?$select=id")
+                if r.status_code == 200:
+                    return True, "Azure AD replication confirmed ✔"
+            except Exception:
+                pass
+            _t.sleep(5)
+        return False, f"User not visible after {max_wait}s — proceeding anyway"
+
+    def set_mail_address(self, user_id: str, email: str) -> Tuple[bool, str]:
+        """PATCH mail property so it shows in Azure portal."""
+        try:
+            r = self._patch(f"{GRAPH_BASE}/users/{user_id}", {"mail": email})
+            if r.status_code in (200, 204):
+                return True, f"mail set to {email}"
+            return False, r.text[:200]
+        except Exception as e:
+            return False, str(e)
+
+    def wait_for_mailbox(self, user_id: str, max_wait: int = 120) -> Tuple[bool, str]:
+        """Poll until Exchange mailbox is provisioned."""
+        import time as _t
+        for _ in range(max_wait // 10):
+            try:
+                r = self._get(f"{GRAPH_BASE}/users/{user_id}/mailboxSettings")
+                if r.status_code == 200:
+                    return True, ""
+            except Exception:
+                pass
+            _t.sleep(10)
+        return False, (
+            f"Exchange mailbox not ready after {max_wait}s — "
+            "aliases may need to be set manually in M365 admin."
+        )
+
+    def add_o365_alias(self, user_id: str, alias_email: str) -> Tuple[bool, str]:
+        """
+        Add an alias (smtp: address) to the user via Graph proxyAddresses.
+        Requires Exchange mailbox to be provisioned.
+        """
+        if not alias_email or "@" not in alias_email:
+            return False, "Invalid alias email"
+        try:
+            r = self._get(f"{GRAPH_BASE}/users/{user_id}",
+                          params={"$select": "proxyAddresses,userPrincipalName"})
+            if r.status_code != 200:
+                return False, f"Cannot read user (HTTP {r.status_code})"
+            
+            data = r.json()
+            current = data.get("proxyAddresses", [])
+            upn = data.get("userPrincipalName", "")
+            
+            # Ensure primary SMTP is present
+            has_primary = any(a.startswith("SMTP:") for a in current)
+            if not has_primary and upn:
+                current.append(f"SMTP:{upn}")
+                
+            alias_entry = f"smtp:{alias_email}"
+            if any(a.lower() == alias_entry.lower() for a in current):
+                return True, f"Alias already exists: {alias_email}"
+            
+            current.append(alias_entry)
+            r2 = self._patch(f"{GRAPH_BASE}/users/{user_id}",
+                             {"proxyAddresses": current})
+            if r2.status_code in (200, 204):
+                return True, f"Alias added: {alias_email}"
+            err = ""
+            try:
+                err = r2.json().get("error", {}).get("message", r2.text[:200])
+            except Exception:
+                err = r2.text[:200]
+            return False, f"Alias failed: {err}"
         except Exception as e:
             return False, str(e)
