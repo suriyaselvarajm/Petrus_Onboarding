@@ -208,7 +208,7 @@ class SplashScreen(tk.Toplevel):
     def _wait_for_az_login(self, attempt: int = 0) -> None:
         """Background thread: poll every 3 s until az login completes."""
         import time
-        for i in range(41):          # max ~2 minutes
+        for _ in range(41):          # max ~2 minutes
             time.sleep(3)
             if check_az_logged_in():
                 self._q.put(("az_ok",))

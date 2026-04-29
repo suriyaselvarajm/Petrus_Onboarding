@@ -19,6 +19,8 @@ import os
 import tempfile
 
 
+ERROR_PREFIX = "ERROR:"
+
 # ── PowerShell runner ──────────────────────────────────────────────────────────
 
 def _ps(script: str, timeout: int = 45) -> Tuple[bool, str, str]:
@@ -126,7 +128,7 @@ class ADService:
             Write-Output "ERR:$($_.Exception.Message)"
         }}
         """
-        ok, out, err = _ps(script, timeout=80)   # generous — first PS run is slow
+        _, out, err = _ps(script, timeout=80)   # generous — first PS run is slow
         if out.startswith("OK:"):
             self._connected = True
             return True, out[3:]
@@ -145,7 +147,7 @@ class ADService:
             Write-Output "NOT_INSTALLED"
         }
         """
-        ok, out, _ = _ps(script, timeout=20)
+        _, out, _ = _ps(script, timeout=20)
         running = "Running" in out
         return running, out
 
@@ -308,13 +310,13 @@ class ADService:
 
             Write-Output 'SUCCESS:{e(sam)}'
         }} catch {{
-            Write-Output "ERROR:$($_.Exception.Message)"
+            Write-Output "{ERROR_PREFIX}$($_.Exception.Message)"
         }}
         """
-        ok, out, err = _ps(script, timeout=90)
+        _, out, err = _ps(script, timeout=90)
         if "SUCCESS:" in out:
             return True, sam
-        msg = (err or out or "Unknown error").replace("ERROR:", "").strip()
+        msg = (err or out or "Unknown error").replace(ERROR_PREFIX, "").strip()
         return False, msg
 
     # ── Post-Creation ─────────────────────────────────────────────────────────
@@ -335,12 +337,12 @@ class ADService:
                 -ErrorAction Stop
             Write-Output 'SUCCESS'
         }} catch {{
-            Write-Output "ERROR:$($_.Exception.Message)"
+            Write-Output "{ERROR_PREFIX}$($_.Exception.Message)"
         }}
         """
         _, out, err = _ps(script)
         ok = "SUCCESS" in out
-        return ok, (err or out).replace("ERROR:", "").strip()
+        return ok, (err or out).replace(ERROR_PREFIX, "").strip()
 
     def add_to_group(self, sam: str, group_dn: str) -> Tuple[bool, str]:
         script = f"""
@@ -353,9 +355,9 @@ class ADService:
                 -ErrorAction Stop
             Write-Output 'SUCCESS'
         }} catch {{
-            Write-Output "ERROR:$($_.Exception.Message)"
+            Write-Output "{ERROR_PREFIX}$($_.Exception.Message)"
         }}
         """
         _, out, err = _ps(script)
         ok = "SUCCESS" in out
-        return ok, (err or out).replace("ERROR:", "").strip()
+        return ok, (err or out).replace(ERROR_PREFIX, "").strip()

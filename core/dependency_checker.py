@@ -61,7 +61,7 @@ def check_azure_cli() -> bool:
 
 
 def check_az_logged_in() -> bool:
-    ok, out, err = _run("az account show --output json", timeout=15)
+    ok, out, _ = _run("az account show --output json", timeout=15)
     try:
         return ok and bool(json.loads(out).get("id"))
     except Exception:
@@ -123,17 +123,10 @@ class DependencyCheck:
         self.progress_cb(pct, msg)
         self.log_cb(msg)
 
-    def run(self) -> Tuple[bool, List[str], List[str]]:
-        """
-        Returns (all_critical_ok, issues, warnings).
-        """
-        steps = len(PYTHON_DEPS) + 3
-        step  = 0
-
-        # ── Python packages ──────────────────────────────────────────
+    def _check_python_packages(self, steps: int, current_step: int) -> int:
         for import_name, pip_spec in PYTHON_DEPS:
-            step += 1
-            pct = round(step / steps * 60)
+            current_step += 1
+            pct = round(current_step / steps * 60)
             if check_python_package(import_name):
                 self._p(pct, f"[OK] {pip_spec}")
             else:
@@ -143,10 +136,11 @@ class DependencyCheck:
                 else:
                     self.issues.append(f"Failed to install {pip_spec}")
                     self._p(pct, f"[ERROR] Could not install {pip_spec}")
+        return current_step
 
-        # ── Azure CLI ────────────────────────────────────────────────
-        step += 1
-        pct = round(step / steps * 80)
+    def _check_azure_cli(self, steps: int, current_step: int) -> int:
+        current_step += 1
+        pct = round(current_step / steps * 80)
         self._p(pct, "Checking Azure CLI...")
         if check_azure_cli():
             self._p(pct, "[OK] Azure CLI found")
@@ -156,9 +150,9 @@ class DependencyCheck:
                 "Azure CLI not installed. Run setup.bat or download from "
                 "https://aka.ms/installazurecliwindows"
             )
+        return current_step
 
-        # ── PowerShell AD module ─────────────────────────────────────
-        step += 1
+    def _check_ps_ad_module(self) -> None:
         self._p(85, "Checking PowerShell ActiveDirectory module...")
         if check_ps_ad_module():
             self._p(87, "[OK] PowerShell ActiveDirectory module present")
@@ -172,8 +166,7 @@ class DependencyCheck:
                     "Enable via: Settings › Optional Features › RSAT: Active Directory"
                 )
 
-        # ── Azure CLI login ──────────────────────────────────────────
-        step += 1
+    def _check_azure_login(self) -> None:
         self._p(95, "Checking Azure CLI authentication...")
         if check_az_logged_in():
             self._p(97, "[OK] Azure CLI authenticated")
@@ -182,6 +175,25 @@ class DependencyCheck:
             self.warnings.append(
                 "Azure CLI login required — secure browser will open automatically."
             )
+
+    def run(self) -> Tuple[bool, List[str], List[str]]:
+        """
+        Returns (all_critical_ok, issues, warnings).
+        """
+        steps = len(PYTHON_DEPS) + 3
+        step  = 0
+
+        # ── Python packages ──────────────────────────────────────────
+        step = self._check_python_packages(steps, step)
+
+        # ── Azure CLI ────────────────────────────────────────────────
+        step = self._check_azure_cli(steps, step)
+
+        # ── PowerShell AD module ─────────────────────────────────────
+        self._check_ps_ad_module()
+
+        # ── Azure CLI login ──────────────────────────────────────────
+        self._check_azure_login()
 
         self._p(100, "Dependency check complete")
         return len(self.issues) == 0, self.issues, self.warnings
