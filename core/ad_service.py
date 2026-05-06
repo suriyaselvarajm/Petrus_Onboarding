@@ -9,7 +9,7 @@ import json
 from typing import Optional, List, Dict, Any, Tuple
 
 from config import (
-    AD_DOMAIN, AD_BASE_DN, AD_PETRUS_USERS_OU,
+    AD_DOMAIN, AD_SERVER, AD_BASE_DN, AD_PETRUS_USERS_OU,
     COMPANY_NAME, DEFAULT_COUNTRY_CODE,
     AD_ADMIN_USER, AD_ADMIN_PASSWORD,
 )
@@ -31,14 +31,23 @@ def _ps(script: str, timeout: int = 45) -> Tuple[bool, str, str]:
     """
     tmp_path = None
     
-    # ── Inject explicit credentials if provided ──
+    # --- Inject explicit credentials or server if provided ---
+    params = {}
+    if AD_ADMIN_USER and AD_ADMIN_PASSWORD:
+        params["*-AD*:Credential"] = "$cred_auth"
+    if AD_SERVER:
+        params["*-AD*:Server"] = f"'{_esc(AD_SERVER)}'"
+
     script_header = ""
     if AD_ADMIN_USER and AD_ADMIN_PASSWORD:
-        script_header = f"""
+        script_header += f"""
         $sec_auth = ConvertTo-SecureString '{_esc(AD_ADMIN_PASSWORD)}' -AsPlainText -Force
         $cred_auth = New-Object System.Management.Automation.PSCredential ('{_esc(AD_ADMIN_USER)}', $sec_auth)
-        $PSDefaultParameterValues = @{{ "*-AD*:Credential" = $cred_auth }}
         """
+    
+    if params:
+        p_str = ", ".join([f'"{k}" = {v}' for k, v in params.items()])
+        script_header += f"\n$PSDefaultParameterValues = @{{ {p_str} }}\n"
 
     full_script = script_header + script
 
@@ -137,6 +146,69 @@ class ADService:
             return False, out[4:].strip()
         return False, _clean_ps_err(err or out)
 
+    def authenticate_and_check_permission(self, username: str, password: str) -> Tuple[bool, str]:
+        """
+        Authenticate an AD user and verify they are a member of 'Domain Admins'.
+        Returns (success, message).
+        """
+        auth_user = username
+        if "\\" not in username and "@" not in username:
+            auth_user = f"{AD_DOMAIN}\\{username}"
+            
+        script = f"""
+        try {{
+            Import-Module ActiveDirectory -ErrorAction Stop
+            $sec_auth = ConvertTo-SecureString '{_esc(password)}' -AsPlainText -Force
+            $cred_auth = New-Object System.Management.Automation.PSCredential ('{_esc(auth_user)}', $sec_auth)
+
+            try {{
+                $u = Get-ADUser -Identity '{_esc(username)}' -Credential $cred_auth -Server '{AD_DOMAIN}' -ErrorAction Stop
+            }} catch {{
+                Write-Output "AUTH_FAIL:$($_.Exception.Message)"
+                exit
+            }}
+
+            try {{
+                $groups = Get-ADPrincipalGroupMembership -Identity '{_esc(username)}' -Credential $cred_auth -Server '{AD_DOMAIN}' -ErrorAction Stop | Select-Object -ExpandProperty Name
+                if ($groups -contains 'Domain Admins') {{
+                    Write-Output "SUCCESS:IS_ADMIN"
+                }} else {{
+                    Write-Output "AUTH_OK:NOT_ADMIN"
+                }}
+            }} catch {{
+                Write-Output "ERR:$($_.Exception.Message)"
+            }}
+        }} catch {{
+            Write-Output "ERR:$($_.Exception.Message)"
+        }}
+        """
+        
+        # Override the configured AD credentials for this specific call
+        import config
+        old_user = config.AD_ADMIN_USER
+        old_pwd = config.AD_ADMIN_PASSWORD
+        config.AD_ADMIN_USER = ""
+        config.AD_ADMIN_PASSWORD = ""
+        
+        try:
+            _, out, err = _ps(script, timeout=60)
+        finally:
+            config.AD_ADMIN_USER = old_user
+            config.AD_ADMIN_PASSWORD = old_pwd
+
+        if "SUCCESS:IS_ADMIN" in out:
+            return True, "Authenticated and verified as Domain Admin"
+        elif "AUTH_OK:NOT_ADMIN" in out:
+            return False, "User authenticated but is not a member of 'Domain Admins'"
+        elif "AUTH_FAIL:" in out:
+            msg = out.split("AUTH_FAIL:", 1)[1].strip()
+            return False, f"Authentication Failed: {msg}"
+        elif "ERR:" in out:
+            msg = out.split("ERR:", 1)[1].strip()
+            return False, f"Error checking permissions: {msg}"
+        
+        return False, _clean_ps_err(err or out)
+
     def check_ad_sync(self) -> Tuple[bool, str]:
         """Check if Azure AD Connect (ADSync) service is running."""
         script = """
@@ -165,8 +237,8 @@ class ADService:
         _, out, _ = _ps(script)
         return "EXISTS" in out
 
-    def get_ous(self, base: str = None) -> List[Dict]:
-        """List OUs directly under Petrus Users OU."""
+    def get_ous(self, base: str = None, scope: str = "OneLevel") -> List[Dict]:
+        """List OUs directly under the specified base (OneLevel by default)."""
         search_base = base or AD_PETRUS_USERS_OU
         script = f"""
         try {{
@@ -174,7 +246,7 @@ class ADService:
             $ous = Get-ADOrganizationalUnit -Filter * `
                        -SearchBase '{_esc(search_base)}' `
                        -Server '{AD_DOMAIN}' `
-                       -SearchScope Subtree `
+                       -SearchScope {scope} `
                        -Properties Name,DistinguishedName |
                    Select-Object Name,DistinguishedName |
                    ConvertTo-Json -Compress
@@ -195,7 +267,8 @@ class ADService:
 
     def get_groups(self, search_base: str = None) -> List[Dict]:
         """List AD groups under the Petrus Users OU subtree."""
-        base = search_base or AD_PETRUS_USERS_OU
+        from config import AD_GROUPS_BASE_OU
+        base = search_base or AD_GROUPS_BASE_OU
         script = f"""
         try {{
             Import-Module ActiveDirectory -ErrorAction Stop
@@ -280,6 +353,7 @@ class ADService:
                 -AccountPassword $pwd `
                 -ChangePasswordAtLogon $true `
                 -Enabled         $true `
+                {manager_line}
                 -Title           '{e(data.get("job_title",""))}' `
                 -Department      '{e(data.get("department",""))}' `
                 -Office          '{e(data.get("office","Coimbatore"))}' `
@@ -292,7 +366,6 @@ class ADService:
                 -Company         '{e(COMPANY_NAME)}' `
                 -EmployeeID      '{e(data.get("employee_id",""))}' `
                 -EmployeeNumber  '{e(data.get("employee_id",""))}' `
-                {manager_line}
                 -Server          '{AD_DOMAIN}' `
                 -ErrorAction Stop
 
@@ -345,11 +418,25 @@ class ADService:
         return ok, (err or out).replace(ERROR_PREFIX, "").strip()
 
     def add_to_group(self, sam: str, group_dn: str) -> Tuple[bool, str]:
+        if group_dn.startswith("NAME:"):
+            identity = group_dn[5:]
+            target_expr = f"""
+            $grp = Get-ADGroup -Filter "Name -eq '{_esc(identity)}' -or DisplayName -eq '{_esc(identity)}'" -Server '{AD_DOMAIN}'
+            if (-not $grp) {{
+                Write-Output "{ERROR_PREFIX}Cannot find an object with name: '{_esc(identity)}'"
+                exit
+            }}
+            $target = $grp.DistinguishedName
+            """
+        else:
+            target_expr = f"$target = '{_esc(group_dn)}'"
+
         script = f"""
         try {{
             Import-Module ActiveDirectory -ErrorAction Stop
+            {target_expr}
             Add-ADGroupMember `
-                -Identity '{_esc(group_dn)}' `
+                -Identity $target `
                 -Members  '{_esc(sam)}' `
                 -Server   '{AD_DOMAIN}' `
                 -ErrorAction Stop
@@ -358,6 +445,67 @@ class ADService:
             Write-Output "{ERROR_PREFIX}$($_.Exception.Message)"
         }}
         """
+    def disable_user(self, sam: str) -> Tuple[bool, str]:
+        script = f"""
+        try {{
+            Import-Module ActiveDirectory -ErrorAction Stop
+            Disable-ADAccount -Identity '{_esc(sam)}' -Server '{AD_DOMAIN}' -ErrorAction Stop
+            Write-Output "SUCCESS"
+        }} catch {{
+            Write-Output "ERR:$($_.Exception.Message)"
+        }}
+        """
         _, out, err = _ps(script)
-        ok = "SUCCESS" in out
-        return ok, (err or out).replace(ERROR_PREFIX, "").strip()
+        if "SUCCESS" in out:
+            return True, "AD account disabled"
+        return False, out.replace("ERR:", "") or _clean_ps_err(err)
+
+    def set_proxy_addresses(self, sam: str, addresses: List[str]) -> Tuple[bool, str]:
+        """Set the proxyAddresses attribute in AD (crucial for hybrid sync)."""
+        addr_list = ", ".join([f"'{_esc(a)}'" for a in addresses])
+        script = f"""
+        try {{
+            Import-Module ActiveDirectory -ErrorAction Stop
+            Set-ADUser -Identity '{_esc(sam)}' -Server '{AD_DOMAIN}' -Replace @{{proxyAddresses=@({addr_list})}} -ErrorAction Stop
+            Write-Output "SUCCESS"
+        }} catch {{
+            Write-Output "ERR:$($_.Exception.Message)"
+        }}
+        """
+        _, out, err = _ps(script)
+        if "SUCCESS" in out:
+            return True, "Proxy addresses updated in AD"
+        return False, out.replace("ERR:", "") or _clean_ps_err(err)
+
+    def add_user_to_group(self, sam: str, group_dn: str) -> Tuple[bool, str]:
+        """Add a user to an AD group."""
+        script = f"""
+        try {{
+            Import-Module ActiveDirectory -ErrorAction Stop
+            Add-ADGroupMember -Identity '{_esc(group_dn)}' -Members '{_esc(sam)}' -Server '{AD_DOMAIN}' -ErrorAction Stop
+            Write-Output "SUCCESS"
+        }} catch {{
+            Write-Output "ERR:$($_.Exception.Message)"
+        }}
+        """
+        _, out, err = _ps(script)
+        if "SUCCESS" in out:
+            return True, "Added to AD group"
+        return False, out.replace("ERR:", "") or _clean_ps_err(err)
+
+    def delete_user(self, sam: str) -> Tuple[bool, str]:
+        """Permanently delete an AD user account."""
+        script = f"""
+        try {{
+            Import-Module ActiveDirectory -ErrorAction Stop
+            Remove-ADUser -Identity '{_esc(sam)}' -Server '{AD_DOMAIN}' -Confirm:$false -ErrorAction Stop
+            Write-Output "SUCCESS"
+        }} catch {{
+            Write-Output "ERR:$($_.Exception.Message)"
+        }}
+        """
+        _, out, err = _ps(script)
+        if "SUCCESS" in out:
+            return True, "AD account deleted"
+        return False, out.replace("ERR:", "") or _clean_ps_err(err)
+

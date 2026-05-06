@@ -11,17 +11,27 @@ import datetime
 from config import APP_TITLE, APP_VERSION, COMPANY_NAME
 from gui.styles import C, F, apply_theme
 from gui.user_form import UserForm
+from gui.offboarding_form import OffboardingForm
+from gui.login_form import LoginForm
 from core.o365_service import O365Service
 from core.ad_service import ADService
 from core.connection_manager import ConnectionManager, ConnectionStatus
 
-<<<<<<< Updated upstream
 # Path to company logo — set this to your logo file (PNG/GIF).
 # Place the logo in the project root or adjust the path.
-=======
->>>>>>> Stashed changes
 import os
-LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logo.png")
+import sys
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+LOGO_PATH = resource_path("logo.png")
 
 
 class OnboardingApp:
@@ -50,15 +60,16 @@ class OnboardingApp:
         self.conn_mgr = ConnectionManager(self.o365, self.ad)
 
         self._form: tk.Widget = None
+        self._login_form: tk.Widget = None
         self._loading_lbl: tk.Label = None
         self._form_shown = False
-<<<<<<< Updated upstream
+        self._is_authenticated = False
         self._logo_img = None    # keep reference to prevent GC
-=======
-        self._logo_img = None    # prevent GC
->>>>>>> Stashed changes
+        self._is_dark = False
+        self._dep_status: Dict[str, bool] = {"az": True, "ad": True}
 
         self._build_ui()
+        self._check_system_dependencies()
         self._start_checks()
 
     # ── UI Construction ───────────────────────────────────────────────────────
@@ -83,6 +94,14 @@ class OnboardingApp:
                    command=self._refresh).pack(side="right", padx=8, pady=4)
         # Hidden by default; shown when AD fails
 
+        # Dependency warning banner
+        self._dep_warn = tk.Frame(self.root, bg=C["error"])
+        self._dep_warn_lbl = tk.Label(
+            self._dep_warn, text="",
+            bg=C["error"], fg="#FFFFFF", font=F["body_sm"]
+        )
+        self._dep_warn_lbl.pack(side="left", padx=12, pady=6)
+        
         # Loading placeholder (shown while O365 is still connecting)
         self._loading_lbl = tk.Label(
             self._content,
@@ -94,9 +113,10 @@ class OnboardingApp:
         self._loading_lbl.pack(expand=True)
 
     def _build_topbar(self):
-        bar = tk.Frame(self.root, bg=C["surface"], height=64)
-        bar.pack(fill="x", side="top")
-        bar.pack_propagate(False)
+        self._topbar = tk.Frame(self.root, bg=C["surface"], height=64)
+        self._topbar.pack(fill="x", side="top")
+        self._topbar.pack_propagate(False)
+        bar = self._topbar
 
         # ── Company Logo ──────────────────────────────────────────────────
         if os.path.isfile(LOGO_PATH):
@@ -107,24 +127,17 @@ class OnboardingApp:
                 tk.Label(bar, image=self._logo_img, bg=C["surface"]
                          ).pack(side="left", padx=(18, 8), pady=8)
             except ImportError:
-<<<<<<< Updated upstream
                 # Pillow not installed — try native PhotoImage (GIF/PGM only)
                 try:
                     self._logo_img = tk.PhotoImage(file=LOGO_PATH)
                     # Subsample if too large
-                    w, h = self._logo_img.width(), self._logo_img.height()
-=======
-                try:
-                    self._logo_img = tk.PhotoImage(file=LOGO_PATH)
-                    w = self._logo_img.width()
->>>>>>> Stashed changes
+                    w, _ = self._logo_img.width(), self._logo_img.height()
                     if w > 48:
                         factor = max(1, w // 44)
                         self._logo_img = self._logo_img.subsample(factor, factor)
                     tk.Label(bar, image=self._logo_img, bg=C["surface"]
                              ).pack(side="left", padx=(18, 8), pady=8)
                 except Exception:
-<<<<<<< Updated upstream
                     tk.Label(bar, text="🏢",
                              bg=C["surface"], font=("Segoe UI Emoji", 22)
                              ).pack(side="left", padx=(18, 4), pady=10)
@@ -133,18 +146,7 @@ class OnboardingApp:
                      bg=C["surface"], font=("Segoe UI Emoji", 22)
                      ).pack(side="left", padx=(18, 4), pady=10)
 
-        # ── Company Name ──────────────────────────────────────────────────
-=======
-                    tk.Label(bar, text="🏢", bg=C["surface"],
-                             font=("Segoe UI Emoji", 22)
-                             ).pack(side="left", padx=(18, 4), pady=10)
-        else:
-            tk.Label(bar, text="🏢", bg=C["surface"],
-                     font=("Segoe UI Emoji", 22)
-                     ).pack(side="left", padx=(18, 4), pady=10)
-
         # ── Company Name (from config.py COMPANY_NAME) ────────────────────
->>>>>>> Stashed changes
         tk.Label(bar, text=COMPANY_NAME.upper(),
                  bg=C["surface"], fg=C["accent"],
                  font=("Segoe UI", 14, "bold")
@@ -153,17 +155,23 @@ class OnboardingApp:
                  bg=C["surface"], fg=C["text_muted"], font=F["body"]
                  ).pack(side="left", pady=10)
 
+        self._theme_btn = ttk.Button(bar, text="🌙  Dark Mode",
+                                    style="Secondary.TButton",
+                                    command=self._toggle_theme)
+        self._theme_btn.pack(side="right", padx=(4, 18), pady=12)
+
         ttk.Button(bar, text="⟳  Refresh Connections",
                    style="Secondary.TButton",
                    command=self._refresh
-                   ).pack(side="right", padx=18, pady=12)
+                   ).pack(side="right", padx=4, pady=12)
 
     def _build_statusbar(self):
-        sb = tk.Frame(self.root, bg=C["surface2"], height=28)
-        sb.pack(fill="x", side="top")
-        sb.pack_propagate(False)
+        self._statusbar = tk.Frame(self.root, bg=C["surface2"], height=28)
+        self._statusbar.pack(fill="x", side="top")
+        self._statusbar.pack_propagate(False)
+        sb = self._statusbar
 
-        def dot(text, var_attr):
+        def dot(var_attr):
             lbl = tk.Label(sb, text="●", bg=C["surface2"],
                            fg=C["text_dim"], font=F["status"])
             lbl.pack(side="left", padx=(14, 2), pady=4)
@@ -179,8 +187,8 @@ class OnboardingApp:
             tk.Label(sb, text="|", bg=C["surface2"],
                      fg=C["border"], font=F["status"]).pack(side="left")
 
-        dot("", "o365");  tag("O365: Connecting…", "o365");  sep()
-        dot("", "ad");    tag("AD: Connecting…",   "ad");    sep()
+        dot("o365");  tag("O365: Connecting…", "o365");  sep()
+        dot("ad");    tag("AD: Connecting…",   "ad");    sep()
         self._sync_lbl = tk.Label(sb, text="AD Sync: Checking…",
                                    bg=C["surface2"], fg=C["text_muted"],
                                    font=F["status"])
@@ -190,6 +198,125 @@ class OnboardingApp:
                                    bg=C["surface2"], fg=C["text_dim"],
                                    font=F["status"])
         self._time_lbl.pack(side="right", padx=14, pady=4)
+
+    # ── Dependency Check ──────────────────────────────────────────────────────
+
+    def _check_system_dependencies(self):
+        """Check for Azure CLI and AD PowerShell modules in background."""
+        def run():
+            import subprocess
+            import os
+            az_ok = False
+            ad_ok = False
+            
+            # 1. Try 'az --version' with shell=True for Windows resolution
+            try:
+                subprocess.run(["az", "--version"], shell=True, capture_output=True, check=True)
+                az_ok = True
+            except Exception:
+                # Fallback: check if az exists in path via where
+                try:
+                    subprocess.run(["where", "az"], shell=True, capture_output=True, check=True)
+                    az_ok = True
+                except Exception: pass
+            
+            # 2. Try AD module check
+            try:
+                out = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Module -ListAvailable ActiveDirectory"], 
+                                     capture_output=True, text=True, shell=True)
+                if "ActiveDirectory" in out.stdout:
+                    ad_ok = True
+            except Exception: pass
+            
+            self._dep_status = {"az": az_ok, "ad": ad_ok}
+            self.root.after(0, self._apply_dep_warning)
+            
+        threading.Thread(target=run, daemon=True).start()
+
+    def _apply_dep_warning(self):
+        if self._dep_status["az"] and self._dep_status["ad"]:
+            self._dep_warn.pack_forget()
+            return
+        
+        missing = []
+        if not self._dep_status["az"]: missing.append("Azure CLI (az)")
+        if not self._dep_status["ad"]: missing.append("AD PowerShell Module")
+        
+        self._dep_warn_lbl.configure(text=f"⚠  Missing Dependencies: {', '.join(missing)}. "
+                                          "Some features may not work. Please install required tools.")
+        self._dep_warn.pack(fill="x", side="top", before=self._topbar)
+
+    # ── Theme Toggle ──────────────────────────────────────────────────────────
+
+    def _toggle_theme(self):
+        self._is_dark = not self._is_dark
+        apply_theme(self.root, is_dark=self._is_dark)
+        
+        # Update text of the button
+        btn_text = "☀️  Light Mode" if self._is_dark else "🌙  Dark Mode"
+        self._theme_btn.configure(text=btn_text)
+        
+        # Recursively update all non-ttk widgets (tk.Frame, tk.Label, etc.)
+        self._update_widget_themes(self.root)
+        
+        # Special handling for elements that need specific colors from C
+        self._topbar.configure(bg=C["surface"])
+        self._statusbar.configure(bg=C["surface2"])
+        # Update status bar dots and labels manually if needed, 
+        # but _update_widget_themes should handle most.
+        
+        # Refresh current form
+        if self._form:
+            is_offboarding = isinstance(self._form, OffboardingForm)
+            self._form.destroy()
+            if is_offboarding: self._show_offboarding()
+            else: self._show_form()
+        elif hasattr(self, "_sel_frame"):
+            self._sel_frame.destroy()
+            self._show_selection()
+
+    def _update_widget_themes(self, parent):
+        """Recursively update standard tk widgets with current theme colors."""
+        for child in parent.winfo_children():
+            wtype = child.winfo_class()
+            
+            # Skip ttk widgets as they are handled by apply_theme
+            if wtype.startswith("T"): 
+                self._update_widget_themes(child)
+                continue
+                
+            try:
+                # Update standard widgets
+                if wtype == "Frame":
+                    # Check if it's a card or bar
+                    # This is tricky without tags, but we can guess by parent or current color
+                    curr_bg = child.cget("bg").upper()
+                    if curr_bg in ["#FFFFFF", "#1E293B"]: # Surface colors
+                        child.configure(bg=C["surface"])
+                    elif curr_bg in ["#E8EDF2", "#334155"]: # Surface2 colors
+                        child.configure(bg=C["surface2"])
+                    elif curr_bg not in ["#DC2626", "#EF4444", "#D97706", "#F59E0B"]: # Don't change error/warning banners
+                        child.configure(bg=C["bg"])
+                        
+                elif wtype == "Label":
+                    curr_bg = child.cget("bg").upper()
+                    if curr_bg in ["#FFFFFF", "#1E293B"]:
+                        child.configure(bg=C["surface"], fg=C["text"])
+                    elif curr_bg in ["#E8EDF2", "#334155"]:
+                        child.configure(bg=C["surface2"], fg=C["text_muted"])
+                    elif curr_bg not in ["#DC2626", "#EF4444", "#D97706", "#F59E0B"]:
+                        child.configure(bg=C["bg"], fg=C["text"])
+                
+                elif wtype == "Text":
+                    child.configure(bg="#1a1a1a" if self._is_dark else "#1a1a1a", # Keep log dark
+                                    fg="#d1d1d1")
+                
+                elif wtype == "Button": # For the selection cards
+                    child.configure(bg=C["surface"], activebackground=C["surface2"])
+
+                self._update_widget_themes(child)
+            except Exception:
+                pass
 
     # ── Connection check ──────────────────────────────────────────────────────
 
@@ -255,7 +382,10 @@ class OnboardingApp:
         # Show form as soon as O365 is connected.
         # AD being disconnected just shows a warning banner — doesn't block the form.
         if status.o365_connected and not self._form_shown:
-            self._show_form()
+            if not self._is_authenticated:
+                self._show_login()
+            else:
+                self._show_selection()
         elif not status.o365_connected and not self._form_shown:
             self._loading_lbl.configure(
                 text="⚠  Cannot connect to O365.\n\n"
@@ -265,11 +395,89 @@ class OnboardingApp:
                 fg=C["warning"],
             )
 
-    def _show_form(self):
+    def _show_login(self):
         self._form_shown = True
         if self._loading_lbl:
             self._loading_lbl.destroy()
             self._loading_lbl = None
-        self._form = UserForm(self._content, self.o365, self.ad)
+        
+        self._login_form = LoginForm(self._content, self.ad, self.o365, self._on_login_success)
+        self._login_form.pack(fill="both", expand=True)
+        
+    def _on_login_success(self):
+        self._is_authenticated = True
+        if self._login_form:
+            self._login_form.destroy()
+            self._login_form = None
+        self._form_shown = False # reset so it correctly triggers _show_selection
+        self._show_selection()
+
+    def _show_selection(self):
+        self._form_shown = True
+        if self._loading_lbl:
+            self._loading_lbl.destroy()
+            self._loading_lbl = None
+        
+        self._sel_frame = tk.Frame(self._content, bg=C["bg"])
+        self._sel_frame.pack(expand=True)
+
+        tk.Label(self._sel_frame, text="What would you like to do today?",
+                 bg=C["bg"], fg=C["text"], font=F["title"],
+                 pady=40).pack()
+
+        btn_frame = tk.Frame(self._sel_frame, bg=C["bg"])
+        btn_frame.pack()
+
+        # Onboarding Button
+        on_btn = tk.Button(btn_frame, text="🚀\n\nEmployee\nOn-boarding",
+                           font=("Segoe UI", 16, "bold"),
+                           bg=C["surface"], fg=C["accent"],
+                           activebackground=C["surface2"], activeforeground=C["accent"],
+                           relief="flat", bd=0, width=20, height=10,
+                           command=self._launch_onboarding)
+        on_btn.pack(side="left", padx=20)
+
+        # Off-boarding Button
+        off_btn = tk.Button(btn_frame, text="👋\n\nEmployee\nOff-boarding",
+                            font=("Segoe UI", 16, "bold"),
+                            bg=C["surface"], fg=C["error"],
+                            activebackground=C["surface2"], activeforeground=C["error"],
+                            relief="flat", bd=0, width=20, height=10,
+                            command=self._launch_offboarding)
+        off_btn.pack(side="left", padx=20)
+
+    def _launch_onboarding(self):
+        self._sel_frame.destroy()
+        self._show_form()
+
+    def _launch_offboarding(self):
+        self._sel_frame.destroy()
+        self._show_offboarding()
+
+    def _show_form(self):
+        self._form = UserForm(self._content, self.o365, self.ad, on_back=self._reset_to_home)
         self._form.pack(fill="both", expand=True)
-        # Expose form ref so _apply_status can position the banner before it
+
+    def _show_offboarding(self):
+        self._form = OffboardingForm(self._content, self.o365, self.ad, on_back=self._reset_to_home)
+        self._form.pack(fill="both", expand=True)
+
+    def _reset_to_home(self):
+        if self._form:
+            self._form.destroy()
+            self._form = None
+        
+        # Clean up selection frame if it somehow exists
+        if hasattr(self, "_sel_frame") and self._sel_frame:
+            try:
+                self._sel_frame.destroy()
+            except Exception: pass
+            self._sel_frame = None
+
+        self._form_shown = False
+        
+        # Show selection screen immediately
+        self._show_selection()
+        
+        # Refresh status in background
+        threading.Thread(target=self.conn_mgr.check_all, daemon=True).start()

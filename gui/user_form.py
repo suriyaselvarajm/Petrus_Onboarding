@@ -8,17 +8,22 @@ from tkinter import ttk, messagebox
 import threading
 import re
 import datetime
+import secrets
+import string
 from typing import Optional, List, Tuple, Dict, Any
 
 from tkcalendar import DateEntry
 
 from config import (
     COMPANY_NAME, EMAIL_DOMAIN, AD_PETRUS_USERS_OU,
-    DEFAULT_PASSWORD, DEFAULT_CITY, DEFAULT_STATE, DEFAULT_ZIP,
+    DEFAULT_CITY, DEFAULT_STATE, DEFAULT_ZIP,
     DEFAULT_COUNTRY, DEFAULT_STREET, DEFAULT_OFFICE,
     LICENSE_OPTIONS, EMPLOYEE_TYPES,
     LICENSE_SKU_MAP, MAILBOX_WAIT_SECONDS,
+    DEFAULT_EMAIL_SENDER, DEFAULT_EMAIL_CC,
 )
+from core.mail_service import MailService
+from core.credential_manager import save_password, get_password
 from gui.styles import C, F
 
 
@@ -41,38 +46,29 @@ class _ScrollableFrame(tk.Frame):
         canvas.configure(yscrollcommand=vsb.set)
         canvas.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-<<<<<<< Updated upstream
-
         # Mouse-wheel scrolling — only scroll the canvas when the
         # cursor is actually over the canvas, NOT over a Combobox,
         # Listbox, or other scrollable widget.  This prevents the
         # bug where scrolling the page changes Combobox / OU values.
-=======
-        # Mouse-wheel scrolling — skip when cursor is over a Combobox or Listbox
->>>>>>> Stashed changes
         self._canvas = canvas
-        def _on_mousewheel(event):
-            try:
-                w = event.widget.winfo_containing(event.x_root, event.y_root)
-            except Exception:
-                w = event.widget
-            wc = getattr(w, "winfo_class", lambda: "")() if w else ""
-            if wc in ("TCombobox", "Listbox", "TSpinbox", "Spinbox"):
-                return
-            canvas.yview_scroll(-1 * (event.delta // 120), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-
         def _on_mousewheel(event):
             # Get the widget directly under the cursor
             try:
+                if not canvas.winfo_exists(): return
                 w = event.widget.winfo_containing(event.x_root, event.y_root)
             except Exception:
                 w = event.widget
+            
             # Skip scrolling if cursor is over a Combobox, Listbox, or Spinbox
-            widget_class = w.winfo_class() if w else ""
+            widget_class = getattr(w, "winfo_class", lambda: "")() if w else ""
             if widget_class in ("TCombobox", "Listbox", "TSpinbox", "Spinbox"):
                 return   # let the widget handle its own scroll
-            canvas.yview_scroll(-1 * (event.delta // 120), "units")
+                
+            try:
+                if canvas.winfo_exists():
+                    canvas.yview_scroll(-1 * (event.delta // 120), "units")
+            except tk.TclError:
+                pass # Widget was destroyed during event processing
 
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
@@ -150,10 +146,12 @@ class UserForm(tk.Frame):
     Right column → License, Manager, O365 Groups, AD config, MFA.
     """
 
-    def __init__(self, parent, o365_service, ad_service):
+    def __init__(self, parent, o365_service, ad_service, on_back=None):
         super().__init__(parent, bg=C["bg"])
         self.o365 = o365_service
         self.ad   = ad_service
+        self.mail = MailService()
+        self._on_back = on_back
 
         # Remote data caches
         self._all_groups:     List[Tuple[str, str, str]] = []  # (id, name, type)
@@ -162,21 +160,36 @@ class UserForm(tk.Frame):
         self._all_ad_groups:  List[Tuple[str, str]] = []   # (name, dn)
         self._all_managers:   List[Tuple[str, str, str]] = []  # (id, name, upn)
         self._license_skus:   dict = {}   # display_name -> sku_id
+        self._license_counts: dict = {}   # display_name -> (available, total)
         self._manager_id:     Optional[str] = None
         self._manager_upn:    Optional[str] = None
         self._email_job:      Optional[str] = None   # after() job id
+        self._check_job:      Optional[str] = None   # for debouncing duplicate checks
 
-        self._build()
+        self._build_ui()
         self.after(400, self._load_remote_data)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Layout
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
-    def _build(self):
+    def _build_ui(self):
+        # ── Header / Back Button ──────────────────────────────────────────
+        header = tk.Frame(self, bg=C["bg"])
+        header.pack(fill="x", padx=20, pady=(20, 0))
+
+        if self._on_back:
+            ttk.Button(header, text="←  Back to Home",
+                       style="Secondary.TButton",
+                       command=self._on_back).pack(side="left")
+
+        tk.Label(header, text="New Employee On-boarding",
+                 bg=C["bg"], fg=C["text"], font=F["title"]).pack(side="left", padx=20)
+
+        # ── Scrollable Content ──────────────────────────────────────────
         scroll = _ScrollableFrame(self)
-        scroll.pack(fill="both", expand=True)
-        inner  = scroll.inner
+        scroll.pack(fill="both", expand=True, padx=20, pady=20)
+        inner = scroll.inner
 
         # Two equal columns
         left  = tk.Frame(inner, bg=C["bg"])
@@ -222,8 +235,10 @@ class UserForm(tk.Frame):
         # Email
         _grid_lbl(card, "Email Address", 2, 0, 2, required=True)
         self.v_email = tk.StringVar()
-        self._e_email = _entry(card, self.v_email, 3, 0, 2, padx=(12, 12))
+        self.v_email.trace_add("write", self._on_name_change)
+        self.v_email.trace_add("write", self._trigger_duplicate_check)
         self.v_email.trace_add("write", self._on_email_change)
+        _entry(card, self.v_email, 3, 0, span=2, padx=(12, 12))
 
         self._email_hint = tk.Label(card, text="",
                                     bg=C["surface"], fg=C["text_muted"],
@@ -233,11 +248,18 @@ class UserForm(tk.Frame):
 
         # Password + force change
         _grid_lbl(card, "Password", 5, 0, required=True)
-        self.v_pwd = tk.StringVar(value=DEFAULT_PASSWORD)
-        _entry(card, self.v_pwd, 6, 0, show="●", padx=(12, 6))
+        pwd_f = tk.Frame(card, bg=C["surface"])
+        pwd_f.grid(row=6, column=0, sticky="ew", padx=(12, 6))
+        
+        self.v_pwd = tk.StringVar(value=self._generate_password())
+        self._e_pwd = ttk.Entry(pwd_f, textvariable=self.v_pwd, font=F["body"])
+        self._e_pwd.pack(side="left", fill="x", expand=True)
+        
+        ttk.Button(pwd_f, text="🎲", width=3,
+                   style="Secondary.TButton",
+                   command=lambda: self.v_pwd.set(self._generate_password())).pack(side="right", padx=(5, 0))
 
         self.v_force_pwd = tk.BooleanVar(value=True)
-        tk.Frame(card, bg=C["surface"]).grid(row=5, column=1)
         tk.Checkbutton(card, text=" Require password change on 1st sign-in",
                        variable=self.v_force_pwd,
                        bg=C["surface"], fg=C["text"],
@@ -245,12 +267,11 @@ class UserForm(tk.Frame):
                        selectcolor=C["accent_dim"],
                        font=F["body_sm"]
                        ).grid(row=6, column=1, sticky="w",
-                              padx=(6, 12), pady=(0, 6))
+                                padx=(6, 12), pady=(0, 6))
 
         # Joining date
-        _grid_lbl(card, "Joining Date", 7, 0, required=True)
-        self._joining_date = _date_entry(card, 8, 0)
-        tk.Frame(card, bg=C["surface"], height=6).grid(row=9, column=0, columnspan=2)
+        _grid_lbl(card, "Joining Date", 8, 0, required=True)
+        self._joining_date = _date_entry(card, 9, 0)
 
     # ──────────────────────────────────────────────────────────────────────────
     #  Section: Profile Information
@@ -295,9 +316,9 @@ class UserForm(tk.Frame):
 
         tk.Frame(card, bg=C["surface"], height=8).grid(row=10, column=0, columnspan=2)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Section: Azure & Company Properties
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _build_azure(self, parent):
         card = _section(parent, "Azure & Company Properties", "☁")
@@ -313,6 +334,7 @@ class UserForm(tk.Frame):
         _grid_lbl(card, "Employee ID", 2, 0)
         _grid_lbl(card, "Employee Type", 2, 1, padx=(6, 12))
         self.v_emp_id   = tk.StringVar()
+        self.v_emp_id.trace_add("write", self._trigger_duplicate_check)
         self.v_emp_type = tk.StringVar(value=EMPLOYEE_TYPES[0])
         _entry (card, self.v_emp_id,   3, 0, padx=(12, 6))
         _combo (card, self.v_emp_type, EMPLOYEE_TYPES, 3, 1, padx=(6, 12))
@@ -342,9 +364,9 @@ class UserForm(tk.Frame):
 
         tk.Frame(card, bg=C["surface"], height=8).grid(row=13, column=0, columnspan=2)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Section: License
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _build_license(self, parent):
         card = _section(parent, "License Assignment", "🗝")
@@ -353,15 +375,16 @@ class UserForm(tk.Frame):
         _grid_lbl(card, "License Type", 0, required=True)
         self.v_license = tk.StringVar(value=LICENSE_OPTIONS[0])
         _combo(card, self.v_license, LICENSE_OPTIONS, 1, padx=(12, 12))
+        self.v_license.trace_add("write", self._on_license_change)
 
         self._license_hint = tk.Label(card, text="Fetching available SKUs…",
                                       bg=C["surface"], fg=C["text_muted"],
                                       font=F["body_sm"], anchor="w")
         self._license_hint.grid(row=2, column=0, sticky="w", padx=14, pady=(0, 10))
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Section: Reporting Manager
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _build_manager(self, parent):
         card = _section(parent, "Reporting Manager", "👔")
@@ -381,9 +404,9 @@ class UserForm(tk.Frame):
                                   bg=C["surface"], fg=C["text_dim"], font=F["body_sm"])
         self._mgr_lbl.grid(row=3, column=0, sticky="w", padx=14, pady=(0, 10))
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Section: O365 Groups
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _build_o365_groups(self, parent):
         card = _section(parent, "O365 Groups", "👥")
@@ -426,53 +449,38 @@ class UserForm(tk.Frame):
         grp_vsb = ttk.Scrollbar(lb_frame, command=self._grp_lb.yview)
         self._grp_lb.configure(yscrollcommand=grp_vsb.set)
         self._grp_lb.grid(row=0, column=0, sticky="ew")
-        grp_vsb.grid(row=0, column=1, sticky="ns")
+        # Selected groups display
+        self._o365_sel_frame = tk.Frame(card, bg=C["surface"])
+        self._o365_sel_frame.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
+        self._grp_lb.bind("<<ListboxSelect>>", self._update_o365_sel_display)
 
         self._grp_hint = tk.Label(card, text="Loading groups…",
                                    bg=C["surface"], fg=C["text_muted"],
                                    font=F["body_sm"], anchor="w")
         self._grp_hint.grid(row=2, column=0, sticky="w", padx=14, pady=(0, 10))
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Section: Active Directory Configuration
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _build_ad_config(self, parent):
         card = _section(parent, "Active Directory Configuration", "🖥")
         card.columnconfigure(0, weight=1)
 
-        # ── Top-level OU selector ────────────────────────────────────────────
-        _grid_lbl(card, "AD Organizational Unit (OU)  *", 0)
-        self.v_ou = tk.StringVar(value="Loading OUs…")
-        self._ou_cb = ttk.Combobox(card, textvariable=self.v_ou,
+        # ── Hierarchical OU Selection ──────────────────────────────────────────
+        _grid_lbl(card, "AD Location (Parent OU)  *", 0)
+        self.v_location = tk.StringVar(value="Loading Locations…")
+        self._ou_cb = ttk.Combobox(card, textvariable=self.v_location,
                                     state="readonly", font=F["body"])
         self._ou_cb.grid(row=1, column=0, sticky="ew", padx=(12, 12), pady=(0, 6))
-        self._ou_cb.bind("<<ComboboxSelected>>", self._on_ou_selected)
+        self._ou_cb.bind("<<ComboboxSelected>>", self._on_location_selected)
 
-        # ── Sub-OU selector (visible after parent OU selected) ───────────────
-        self._sub_ou_lbl_row = tk.Frame(card, bg=C["surface"])  # placeholder
-        self._sub_ou_lbl_row.grid(row=2, column=0, sticky="ew")
-        _grid_lbl(self._sub_ou_lbl_row, "Sub-OU (optional)", 0, 0)
-
-        self.v_sub_ou = tk.StringVar(value="")
+        _grid_lbl(card, "AD Department / Sub-OU  *", 2)
+        self.v_sub_ou = tk.StringVar(value="Select location first")
         self._sub_ou_cb = ttk.Combobox(card, textvariable=self.v_sub_ou,
                                         state="readonly", font=F["body"])
         self._sub_ou_cb.grid(row=3, column=0, sticky="ew", padx=(12, 12), pady=(0, 6))
-        self._sub_ou_cb.grid_remove()   # hidden until parent OU chosen
         self._sub_ou_cb.bind("<<ComboboxSelected>>", self._on_sub_ou_selected)
-
-        # AD path preview
-        _grid_lbl(card, "AD User Account Path (preview)", 4)
-        self.v_ad_path = tk.StringVar(value=f"CN=...,{AD_PETRUS_USERS_OU}")
-        path_entry = tk.Entry(card, textvariable=self.v_ad_path,
-                               state="readonly",
-                               bg=C["input_bg"], fg=C["text_dim"],
-                               disabledbackground=C["input_bg"],
-                               disabledforeground=C["text_dim"],
-                               font=("Consolas", 8), relief="flat", bd=0,
-                               readonlybackground=C["input_bg"])
-        path_entry.grid(row=5, column=0, sticky="ew",
-                        padx=(12, 12), pady=(0, 8))
 
         # AD Groups
         _grid_lbl(card, "AD Groups  (Ctrl+click to multi-select)", 6)
@@ -490,12 +498,17 @@ class UserForm(tk.Frame):
         self._ad_grp_lb.configure(yscrollcommand=ad_vsb.set)
         self._ad_grp_lb.grid(row=0, column=0, sticky="ew")
         ad_vsb.grid(row=0, column=1, sticky="ns")
+        
+        # Selected AD groups display
+        self._ad_sel_frame = tk.Frame(card, bg=C["surface"])
+        self._ad_sel_frame.grid(row=8, column=0, sticky="ew", padx=12, pady=(0, 10))
+        self._ad_grp_lb.bind("<<ListboxSelect>>", self._update_ad_sel_display)
 
-        tk.Frame(card, bg=C["surface"], height=8).grid(row=8, column=0)
+        tk.Frame(card, bg=C["surface"], height=8).grid(row=9, column=0)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Section: Security / MFA
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _build_security(self, parent):
         card = _section(parent, "Security & MFA", "🔐")
@@ -507,15 +520,54 @@ class UserForm(tk.Frame):
                        activebackground=C["surface"],
                        selectcolor=C["accent_dim"],
                        font=F["body"]).pack(anchor="w", padx=16, pady=(12, 4))
+        
+        # Welcome Email Section
+        tk.Frame(card, bg=C["surface2"], height=1).pack(fill="x", pady=10)
+        self.v_send_email = tk.BooleanVar(value=True)
+        tk.Checkbutton(card, text=" Send Welcome Email to User",
+                       variable=self.v_send_email,
+                       bg=C["surface"], fg=C["text"],
+                       activebackground=C["accent"],
+                       font=F["subtitle_sm"]).pack(anchor="w", padx=16, pady=5)
+        
+        mail_frame = tk.Frame(card, bg=C["surface"])
+        mail_frame.pack(fill="x", padx=16, pady=5)
+        
+        _grid_lbl(mail_frame, "Sender Email", 0, 0)
+        self.v_mail_sender = tk.StringVar(value=DEFAULT_EMAIL_SENDER)
+        _entry(mail_frame, self.v_mail_sender, 1, 0, padx=(0, 6))
+        
+        _grid_lbl(mail_frame, "Sender Password", 0, 1)
+        self.v_mail_pwd = tk.StringVar()
+        
+        pwd_sub = tk.Frame(mail_frame, bg=C["surface"])
+        pwd_sub.grid(row=1, column=1, sticky="ew", padx=(6, 0))
+        
+        self._mail_pwd_entry = ttk.Entry(pwd_sub, textvariable=self.v_mail_pwd, font=F["body"], show="●")
+        self._mail_pwd_entry.pack(side="left", fill="x", expand=True)
+        
+        self._save_pwd_btn = ttk.Button(pwd_sub, text="💾", width=3,
+                                        style="Secondary.TButton",
+                                        command=self._save_mail_password)
+        self._save_pwd_btn.pack(side="right", padx=(5, 0))
+        
+        _grid_lbl(mail_frame, "Receiver Email (Personal) *", 2, 0)
+        self.v_mail_receiver = tk.StringVar()
+        _entry(mail_frame, self.v_mail_receiver, 3, 0, padx=(0, 6))
+
+        _grid_lbl(mail_frame, "CC Email", 2, 1)
+        self.v_mail_cc = tk.StringVar(value=DEFAULT_EMAIL_CC)
+        _entry(mail_frame, self.v_mail_cc, 3, 1, padx=(6, 0))
+        
         tk.Label(card,
-                 text="User will be prompted to register MFA on first login.",
+                 text="MFA will be retried up to 3 times if it fails.",
                  bg=C["surface"], fg=C["text_muted"],
                  font=F["body_sm"], wraplength=300, justify="left"
-                 ).pack(anchor="w", padx=20, pady=(0, 12))
+                 ).pack(anchor="w", padx=20, pady=(10, 12))
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Action Bar
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _build_action_bar(self, parent):
         bar = tk.Frame(parent, bg=C["surface2"])
@@ -539,33 +591,113 @@ class UserForm(tk.Frame):
             command=self._on_submit)
         self._submit_btn.pack(side="right", padx=4, pady=12)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Remote data loading
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _load_remote_data(self):
+        # Load saved password
+        saved = get_password(self.v_mail_sender.get())
+        if saved:
+            self.v_mail_pwd.set(saved)
+            
         for fn in (self._fetch_groups, self._fetch_ous_and_ad_groups,
                    self._fetch_managers, self._fetch_licenses):
             threading.Thread(target=fn, daemon=True).start()
 
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _generate_password(self):
+        """Helper to generate a strong password and update the UI."""
+        import secrets
+        import string
+        length = 12
+        alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+        pwd_list = [
+            secrets.choice(string.ascii_lowercase),
+            secrets.choice(string.ascii_uppercase),
+            secrets.choice(string.digits),
+            secrets.choice("!@#$%^&*")
+        ]
+        pwd_list += [secrets.choice(alphabet) for _ in range(length - 4)]
+        secrets.SystemRandom().shuffle(pwd_list)
+        pwd = "".join(pwd_list)
+        
+        # Update the UI variable
+        if hasattr(self, "v_pwd"):
+            self.v_pwd.set(pwd)
+        return pwd
+
+    def _generate_password(self):
+        """Helper to generate a strong password and update the UI."""
+        import secrets
+        import string
+        length = 12
+        alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+        pwd_list = [
+            secrets.choice(string.ascii_lowercase),
+            secrets.choice(string.ascii_uppercase),
+            secrets.choice(string.digits),
+            secrets.choice("!@#$%^&*")
+        ]
+        pwd_list += [secrets.choice(alphabet) for _ in range(length - 4)]
+        secrets.SystemRandom().shuffle(pwd_list)
+        pwd = "".join(pwd_list)
+        
+        # Update the UI variable
+        if hasattr(self, "v_pwd"):
+            self.v_pwd.set(pwd)
+        return pwd
+
+    def _save_mail_password(self):
+        email = self.v_mail_sender.get().strip()
+        pwd   = self.v_mail_pwd.get()
+        if not email or not pwd:
+            messagebox.showwarning("Warning", "Enter both email and password to save.")
+            return
+        save_password(email, pwd)
+        messagebox.showinfo("Saved", "Password saved securely in Windows Vault.")
+
+    def _trigger_duplicate_check(self, *_):
+        """Debounced check for duplicates."""
+        if self._check_job:
+            self.after_cancel(self._check_job)
+        self._check_job = self.after(1000, self._run_duplicate_check)
+
+    def _run_duplicate_check(self):
+        email = self.v_email.get().strip()
+        emp_id = self.v_emp_id.get().strip()
+        if not email and not emp_id: return
+        
+        def run():
+            ok, msg = self.o365.check_duplicates(email, emp_id)
+            if ok:
+                self.after(0, lambda: self.winfo_exists() and messagebox.showwarning("Duplicate Detected", msg))
+        
+        threading.Thread(target=run, daemon=True).start()
+
     def _fetch_groups(self):
-        groups = self.o365.get_groups()
+        # The user requested to see ONLY Distribution Lists here
+        groups = self.o365.get_distribution_lists()
         # Store (id, name, type)
         self._all_groups = [
-            (g["id"], g["displayName"], g.get("_type", "Group"))
+            (g["id"], g["displayName"], g.get("_type", "Distribution List"))
             for g in groups
         ]
         self.after(0, self._populate_groups)
 
     def _populate_groups(self, data: List[Tuple] = None):
+        if not self.winfo_exists(): return
         items = data if data is not None else self._all_groups
-        self._grp_lb.delete(0, "end")
-        for _, name, gtype in items:
-            self._grp_lb.insert("end", f"[{gtype}]  {name}")
-        n = len(items)
-        self._grp_hint.configure(
-            text=f"{n} item{'s' if n != 1 else ''} — Ctrl+click to multi-select",
-            fg=C["success"] if n else C["warning"])
+        try:
+            self._grp_lb.delete(0, "end")
+            for _, name, gtype in items:
+                self._grp_lb.insert("end", f"[{gtype}]  {name}")
+            n = len(items)
+            self._grp_hint.configure(
+                text=f"{n} DLs found — Hold 'Ctrl' key to select multiple",
+                fg=C["success"] if n else C["warning"])
+        except tk.TclError: pass
 
     def _filter_groups(self, *_):
         q    = self.v_grp_search.get().lower()
@@ -579,36 +711,26 @@ class UserForm(tk.Frame):
         self._populate_groups(filtered)
 
     def _fetch_ous_and_ad_groups(self):
-        ous = self.ad.get_ous()
+        # Fetch ONLY top-level OUs under Petrus Users
+        ous = self.ad.get_ous(scope="OneLevel")
         self._all_ad_ous = [
             (o.get("Name", ""), o.get("DistinguishedName", "")) for o in ous
         ]
         self.after(0, self._populate_ous)
-        # Load groups for default (first) OU
-        if self._all_ad_ous:
-            self._reload_ad_groups(self._all_ad_ous[0][1])
-        else:
-            self._reload_ad_groups(None)
+        
+        # Load AD groups from the specific DL/AD Use path defined in config
+        self._reload_ad_groups(None) # None uses default from config
 
     def _populate_ous(self):
-        names = []
-        for name, dn in self._all_ad_ous:
-            # Parse DistinguishedName to create a hierarchical path, e.g., Coimbatore \ Electrical
-            parts = [p for p in dn.split(',') if p.upper().startswith('OU=')]
-            ous = [p.split('=')[1] for p in reversed(parts)]
-            # Drop the root 'Petrus-Users' if it's there, to keep names clean
-            ous = [ou for ou in ous if ou.lower() != 'petrus-users']
-            names.append(" \\ ".join(ous) if ous else name)
-            
+        if not self.winfo_exists(): return
+        names = [o[0] for o in self._all_ad_ous]
         if not names:
-            from config import AD_PETRUS_USERS_OU
-            names = [f"Petrus Users (default — {AD_PETRUS_USERS_OU})"]
-        self._ou_cb.configure(values=names)
-        self._ou_cb.current(0)
-        self._update_ad_path()
-        # Hide sub-OU selector until an OU is picked
-        self._sub_ou_cb.grid_remove()
-        self.v_sub_ou.set("")
+            names = ["No locations found"]
+        try:
+            self._ou_cb.configure(values=names)
+            self.v_location.set("Select location...")
+            self.v_sub_ou.set("Select location first")
+        except tk.TclError: pass
 
     def _reload_ad_groups(self, ou_dn: Optional[str]):
         """Fetch AD groups under a given OU DN (in background thread)."""
@@ -620,54 +742,35 @@ class UserForm(tk.Frame):
             self.after(0, self._populate_ad_groups)
         threading.Thread(target=run, daemon=True).start()
 
-    def _on_ou_selected(self, event=None):
-        """When a top-level OU is chosen: fetch its sub-OUs and load AD groups."""
+    def _on_location_selected(self, *_):
         idx = self._ou_cb.current()
-        if idx < 0 or idx >= len(self._all_ad_ous):
-            return
-        _, ou_dn = self._all_ad_ous[idx]
-        self._update_ad_path()
+        if idx < 0: return
+        name, dn = self._all_ad_ous[idx]
+        self.v_location.set(name)
+        # Fetch sub-OUs
+        threading.Thread(target=self._fetch_sub_ous, args=(dn,), daemon=True).start()
 
-        # Fetch sub-OUs for selected OU in background
-        def fetch_sub():
-            sub_ous = self.ad.get_ous(base=ou_dn)
-            self._sub_ous = [
-                (o.get("Name", ""), o.get("DistinguishedName", "")) for o in sub_ous
-            ]
-            self.after(0, self._populate_sub_ous)
-        threading.Thread(target=fetch_sub, daemon=True).start()
+    def _fetch_sub_ous(self, parent_dn):
+        sub_ous = self.ad.get_ous(base=parent_dn, scope='OneLevel')
+        self._sub_ous = [(o.get('Name', ''), o.get('DistinguishedName', '')) for o in sub_ous]
+        names = [o[0] for o in self._sub_ous]
+        if not names:
+            self.after(0, lambda: self.v_sub_ou.set('No sub-OUs found'))
+            self.after(0, lambda: self._sub_ou_cb.configure(values=[]))
+        else:
+            self.after(0, lambda: self._sub_ou_cb.configure(values=names))
+            self.after(0, lambda: self.v_sub_ou.set('Select department...'))
 
-        # Also reload AD groups scoped to this OU
-        self._reload_ad_groups(ou_dn)
-
-    def _populate_sub_ous(self):
-        if not self._sub_ous:
-            self._sub_ou_cb.grid_remove()
-            self.v_sub_ou.set("")
-            return
-        names = ["(Use parent OU)"] + [n for n, _ in self._sub_ous]
-        self._sub_ou_cb.configure(values=names)
-        self._sub_ou_cb.current(0)
-        self._sub_ou_cb.grid()   # show it
-
-    def _on_sub_ou_selected(self, event=None):
-        """When sub-OU is chosen, update path and reload AD groups under sub-OU."""
-        sub_idx = self._sub_ou_cb.current()
-        if sub_idx <= 0:   # 0 = "(Use parent OU)"
-            # Revert to parent OU groups
-            idx = self._ou_cb.current()
-            if idx >= 0 and idx < len(self._all_ad_ous):
-                self._reload_ad_groups(self._all_ad_ous[idx][1])
-            self._update_ad_path()
-            return
-        _, sub_dn = self._sub_ous[sub_idx - 1]   # -1 for the "(Use parent OU)" sentinel
-        self._update_ad_path()
-        self._reload_ad_groups(sub_dn)
+    def _on_sub_ou_selected(self, *_):
+        pass # Value is in v_sub_ou
 
     def _populate_ad_groups(self):
-        self._ad_grp_lb.delete(0, "end")
-        for name, _ in self._all_ad_groups:
-            self._ad_grp_lb.insert("end", name)
+        if not self.winfo_exists(): return
+        try:
+            self._ad_grp_lb.delete(0, "end")
+            for name, _ in self._all_ad_groups:
+                self._ad_grp_lb.insert("end", name)
+        except tk.TclError: pass
 
     def _fetch_managers(self):
         users = self.o365.get_users()
@@ -678,9 +781,12 @@ class UserForm(tk.Frame):
         self.after(0, self._populate_managers)
 
     def _populate_managers(self, data=None):
+        if not self.winfo_exists(): return
         items = data if data is not None else self._all_managers
         vals = [f"{name}  ({upn})" for _, name, upn in items]
-        self._mgr_combo.configure(values=vals)
+        try:
+            self._mgr_combo.configure(values=vals)
+        except tk.TclError: pass
 
     def _filter_managers(self, e=None):
         q = self.v_mgr_search.get().lower()
@@ -696,48 +802,78 @@ class UserForm(tk.Frame):
         from config import LICENSE_SKU_MAP
         skus = self.o365.get_license_skus()
         sku_map = {}
+        counts  = {}
+        
         for sku in skus:
             part   = sku.get("skuPartNumber", "").upper()
             sku_id = sku.get("skuId", "")
-<<<<<<< Updated upstream
+            
+            # Calculate counts
+            consumed = sku.get("consumedUnits", 0)
+            enabled  = sku.get("prepaidUnits", {}).get("enabled", 0)
+            available = max(0, enabled - consumed)
+            
             # Match ONLY O365/M365 Business SKUs — be very specific
             # to avoid matching POWER_BI_STANDARD or other unrelated SKUs
-=======
->>>>>>> Stashed changes
+            name = None
             if part in ("O365_BUSINESS_ESSENTIALS", "SMB_BUSINESS_ESSENTIALS",
                         "M365_BUSINESS_BASIC"):
-                sku_map["Microsoft 365 Business Basic"] = sku_id
+                name = "Microsoft 365 Business Basic"
             elif part in ("O365_BUSINESS_PREMIUM", "SMB_BUSINESS_PREMIUM",
                           "M365_BUSINESS_STANDARD", "SPB"):
-                sku_map["Microsoft 365 Business Standard"] = sku_id
-<<<<<<< Updated upstream
+                name = "Microsoft 365 Business Standard"
+            
+            if name:
+                sku_map[name] = sku_id
+                counts[name]  = (available, enabled)
 
         # Fall back to hardcoded SKU IDs for any that weren't matched
         for name, fallback_id in LICENSE_SKU_MAP.items():
             if name not in sku_map:
                 sku_map[name] = fallback_id
+                # counts[name] remains missing -> "Count unavailable"
+        
+        self._license_skus   = sku_map
+        self._license_counts = counts
+        
+        def update_ui():
+            if not self.winfo_exists(): return
+            n = len(skus)
+            try:
+                self._license_hint.configure(
+                    text=f"{n} SKU(s) loaded from tenant",
+                    fg=C["success"] if n else C["warning"])
+                self._on_license_change() # Trigger initial update of the count hint
+            except tk.TclError: pass
 
-=======
-        # Fallback to hardcoded SKU IDs
-        for name, fallback_id in LICENSE_SKU_MAP.items():
-            if name not in sku_map:
-                sku_map[name] = fallback_id
->>>>>>> Stashed changes
-        self._license_skus = sku_map
-        self.after(0, lambda: self._license_hint.configure(
-            text=f"{len(skus)} SKU(s) loaded from tenant",
-            fg=C["success"] if skus else C["warning"]))
+        self.after(0, update_ui)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    def _on_license_change(self, *_):
+        if not self.winfo_exists(): return
+        name = self.v_license.get()
+        try:
+            if name in self._license_counts:
+                avail, total = self._license_counts[name]
+                color = C["success"] if avail > 0 else C["error"]
+                self._license_hint.configure(
+                    text=f"Available: {avail} / Total: {total}", fg=color)
+            else:
+                # Only show "Loading..." if we haven't loaded anything yet
+                if not self._license_skus:
+                    self._license_hint.configure(text="Fetching available SKUs…", fg=C["text_muted"])
+                else:
+                    self._license_hint.configure(text="License count unavailable", fg=C["warning"])
+        except tk.TclError: pass
+
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Event handlers
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _on_name_change(self, *_):
         first = re.sub(r"[^a-z0-9]", "", self.v_first.get().strip().lower())
         last  = re.sub(r"[^a-z0-9]", "", self.v_last.get().strip().lower())
         if first and last:
             self.v_email.set(f"{first}.{last}@{EMAIL_DOMAIN}")
-        self._update_ad_path()
 
     def _on_email_change(self, *_):
         email = self.v_email.get().strip()
@@ -790,63 +926,87 @@ class UserForm(tk.Frame):
                     text=f"✅  {name}  ({upn})", fg=C["success"])
                 break
 
-    def _update_ad_path(self, *_):
-        first   = self.v_first.get().strip()
-        last    = self.v_last.get().strip()
-        display = f"{first} {last}".strip() or "..."
-        # Determine effective OU DN (sub-OU takes priority if selected)
-        ou_dn = AD_PETRUS_USERS_OU
-        sub_idx = self._sub_ou_cb.current() if self._sub_ou_cb.winfo_ismapped() else -1
-        if sub_idx > 0 and sub_idx - 1 < len(self._sub_ous):
-            ou_dn = self._sub_ous[sub_idx - 1][1]
-        else:
-            idx = self._ou_cb.current()
-            if idx >= 0 and idx < len(self._all_ad_ous):
-                ou_dn = self._all_ad_ous[idx][1]
-        self.v_ad_path.set(f"CN={display},{ou_dn}")
+    # (Removed _update_ad_path as path preview was removed from UI)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Clear
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _clear_form(self):
         if not messagebox.askyesno("Clear", "Clear all form fields?"):
             return
         for var, default in [
             (self.v_first, ""), (self.v_last, ""),
-            (self.v_email, ""), (self.v_pwd, DEFAULT_PASSWORD),
+            (self.v_email, ""), (self.v_pwd, self._generate_password()),
             (self.v_job_title, ""), (self.v_dept, ""),
             (self.v_office, DEFAULT_OFFICE), (self.v_mobile, ""),
             (self.v_street, DEFAULT_STREET), (self.v_city, DEFAULT_CITY),
             (self.v_state, DEFAULT_STATE), (self.v_zip, DEFAULT_ZIP),
             (self.v_country, DEFAULT_COUNTRY), (self.v_emp_id, ""),
             (self.v_o365_alias, f"@{EMAIL_DOMAIN}"),
+            (self.v_mail_pwd, ""), (self.v_mail_receiver, ""),
         ]:
             var.set(default)
         self._manager_id = self._manager_upn = None
         self._mgr_lbl.configure(text="No manager selected", fg=C["text_dim"])
         self._grp_lb.selection_clear(0, "end")
         self._ad_grp_lb.selection_clear(0, "end")
-        self._sub_ou_cb.grid_remove()
-        self.v_sub_ou.set("")
+        self._update_o365_sel_display()
+        self._update_ad_sel_display()
+        self.v_location.set("Select location...")
+        self.v_sub_ou.set("Select location first")
         self._status_lbl.configure(text="")
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Validation & data collection
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _validate(self) -> Tuple[bool, str]:
         if not self.v_first.get().strip():
             return False, "First Name is required"
         if not self.v_last.get().strip():
             return False, "Last Name is required"
+        
         email = self.v_email.get().strip()
         if not email or "@" not in email:
             return False, "A valid Email Address is required"
+        
         if not self.v_pwd.get().strip():
             return False, "Password is required"
-        if not self.v_mobile.get().strip():
+        
+        # Mobile number validation (exactly 10 digits)
+        mobile = self.v_mobile.get().strip()
+        if not mobile:
             return False, "Mobile Phone is required"
+        # Remove common separators if any (though user asked for "only number")
+        clean_mobile = "".join(c for c in mobile if c.isdigit())
+        if len(clean_mobile) != 10:
+            return False, "Mobile Phone must be exactly 10 digits"
+        if len(mobile) != 10 or not mobile.isdigit():
+             return False, "Mobile Phone must contain only 10 digits (no spaces or special characters)"
+
+        # Receiver Email validation
+        # Receiver Email validation
+        if self.v_send_email.get():
+            receiver = self.v_mail_receiver.get().strip()
+            if not receiver:
+                return False, "Receiver Email (Personal) is required to send the Welcome Email"
+            if "@" not in receiver:
+                return False, "A valid Receiver Email (Personal) is required"
+
+        # Joining Date validation
+        if not self._joining_date.get_date():
+            return False, "Joining Date is required"
+
+        # AD Location validation
+        if self.v_location.get() in ("", "Loading Locations...", "Select location..."):
+            return False, "AD Location (Parent OU) is required"
+        
+        sub_ou = self.v_sub_ou.get()
+        if sub_ou in ("", "Select location first", "No sub-OUs found"):
+            # We allow it if there truly are no sub-OUs, but usually it's required
+            pass
+
         return True, ""
 
     def _collect(self) -> Dict[str, Any]:
@@ -883,13 +1043,13 @@ class UserForm(tk.Frame):
 
         # OU DN — sub-OU overrides parent if selected
         ou_dn = AD_PETRUS_USERS_OU
-        sub_idx = self._sub_ou_cb.current() if self._sub_ou_cb.winfo_ismapped() else -1
-        if sub_idx > 0 and sub_idx - 1 < len(self._sub_ous):
-            ou_dn = self._sub_ous[sub_idx - 1][1]
+        sub_idx = self._sub_ou_cb.current()
+        if sub_idx >= 0 and sub_idx < len(self._sub_ous):
+            ou_dn = self._sub_ous[sub_idx][1]
         else:
-            idx = self._ou_cb.current()
-            if idx >= 0 and idx < len(self._all_ad_ous):
-                ou_dn = self._all_ad_ous[idx][1]
+            loc_idx = self._ou_cb.current()
+            if loc_idx >= 0 and loc_idx < len(self._all_ad_ous):
+                ou_dn = self._all_ad_ous[loc_idx][1]
 
         # License SKU
         lic_name = self.v_license.get()
@@ -928,11 +1088,12 @@ class UserForm(tk.Frame):
             "o365_alias":       o365_alias,
             "ad_ou":            ou_dn,
             "ad_groups":        ad_groups,
+            "receiver_email":   self.v_mail_receiver.get().strip(),
         }
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
     #  Submission
-    # ──────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def _on_submit(self):
         ok, msg = self._validate()
@@ -980,7 +1141,6 @@ class UserForm(tk.Frame):
             return
         step(ok, f"O365 user created ({user_id[:8]}…)")
 
-<<<<<<< Updated upstream
         # ── 1b. Wait for Azure AD replication ────────────────────────────────
         step(True, "⏳ Waiting for Azure AD replication (up to 60 s)…")
         prov_ok, prov_msg = self.o365.wait_for_user_provisioned(user_id, max_wait=60)
@@ -1003,142 +1163,100 @@ class UserForm(tk.Frame):
             step(True, "Assigning license (retrying if needed)…")
             lic_ok, m2 = self.o365.assign_license(user_id, sku_id)
             step(lic_ok, f"License: {m2}")
-=======
-        # ── 1b. Wait for replication ──────────────────────────────────────────
-        step(True, "⏳ Waiting for Azure AD replication (up to 60 s)…")
-        rep_ok, rep_msg = self.o365.wait_for_replication(user_id)
-        step(rep_ok, rep_msg)
-
-        # ── 1c. Set mail address ──────────────────────────────────────────────
-        mail_ok, mail_msg = self.o365.set_mail_address(user_id, data["email"])
-        step(mail_ok, f"Azure AD mail: {mail_msg}")
-
-        # ── 2. Assign license ─────────────────────────────────────────────────
-        sku_id = data.get("license_sku_id")
-        if not sku_id:
-            sku_id = LICENSE_SKU_MAP.get(data.get("license_name", ""))
-        if sku_id:
-            step(True, "Assigning license (retrying if needed)…")
-            ok2, m2 = self.o365.assign_license(user_id, sku_id)
-            step(ok2, f"License: {m2}")
->>>>>>> Stashed changes
         else:
             step(False, f"License SKU for '{data['license_name']}' not found — assign manually")
 
-<<<<<<< Updated upstream
         # ── 2b. Wait for Exchange mailbox provisioning ────────────────────────
         # Groups and aliases in O365 require an active Exchange mailbox.
         # The mailbox only becomes live AFTER the license is applied.
-=======
-        # ── 2b. Wait for Exchange mailbox ─────────────────────────────────────
->>>>>>> Stashed changes
         step(True, f"⏳ Waiting for Exchange Online mailbox (up to {MAILBOX_WAIT_SECONDS}s)…")
         mbx_ok, mbx_msg = self.o365.wait_for_mailbox(user_id, max_wait=MAILBOX_WAIT_SECONDS)
         if mbx_ok:
             step(True, "Exchange mailbox ready ✔")
         else:
-<<<<<<< Updated upstream
             step(False, f"{mbx_msg}  — will retry after AD creation")
-=======
-            step(False, f"{mbx_msg} — will retry after AD creation")
->>>>>>> Stashed changes
 
         # ── 3. Manager ────────────────────────────────────────────────────────
         if data.get("manager_id"):
             ok4, m4 = self.o365.set_manager(user_id, data["manager_id"])
             step(ok4, f"Manager: {m4}")
 
-<<<<<<< Updated upstream
         # ── 4. First attempt: Alias, Groups ──────────────────────────────────
         # Track failures for retry after AD creation
         retry_alias   = False
         retry_groups  = []    # list of (gid, gname) that failed
 
         emp_id     = data.get("employee_id", "")
+        # Generate alias if not already provided
         o365_alias = data.get("o365_alias", "")
+        if not o365_alias and emp_id and "@" in data["email"]:
+            o365_alias = f"{emp_id}@{data['email'].split('@')[1]}"
 
-        # 4a. MFA — skipped (enable manually in Azure portal)
+        # 4a. MFA
         if data.get("enable_mfa"):
             step(True, "ℹ MFA: Please enable MFA manually in Azure portal → Users → Per-user MFA")
 
         # 4b. O365 Alias (employeeID@domain)
-=======
-        # ── 4. MFA (skipped — enable manually) ───────────────────────────────
-        if data.get("enable_mfa"):
-            step(True, "ℹ MFA: Please enable manually in Azure portal → Users → Per-user MFA")
-
-        # ── 5. O365 Alias + Groups (first attempt) ───────────────────────────
-        retry_alias  = False
-        retry_groups = []
-        emp_id     = data.get("employee_id", "")
-        o365_alias = f"{emp_id}@{data['email'].split('@')[1]}" if emp_id and "@" in data["email"] else ""
-
->>>>>>> Stashed changes
         if o365_alias:
             al_ok, al_msg = self.o365.add_o365_alias(user_id, o365_alias)
             step(al_ok, f"O365 alias: {al_msg}")
-            if not al_ok:
-                retry_alias = True
+            if not al_ok: retry_alias = True
 
-<<<<<<< Updated upstream
-        # 4c. O365 Groups
-=======
->>>>>>> Stashed changes
-        for gid, gname in data.get("o365_groups", []):
-            ok5, m5 = self.o365.add_to_group(user_id, gid)
-            step(ok5, f"O365 group '{gname}': {m5}")
-            if not ok5:
-                retry_groups.append((gid, gname))
+        # 4c. O365 Groups (Cloud-only) - Batch processed to avoid multiple logins
+        admin_upn = self.v_mail_sender.get()
+        o365_groups = data.get("o365_groups", [])
+        if o365_groups:
+            results = self.o365.add_to_groups_multi(user_id, o365_groups, admin_upn=admin_upn)
+            for gname, ok, msg in results:
+                step(ok, f"O365 group '{gname}': {msg}")
+                if not ok:
+                    # Find the gid for this group name to retry
+                    gid = next((g[0] for g in o365_groups if g[1] == gname), None)
+                    if gid: retry_groups.append((True, gid, gname))
 
         # 4d. Zoho Enterprise App
-        ok6, m6 = self.o365.add_to_zoho_enterprise_app(user_id)
-        step(ok6, f"Zoho Accounts: {m6}")
+        zoho_ok, m6 = self.o365.add_to_zoho_enterprise_app(user_id)
+        step(zoho_ok, f"Zoho Accounts: {m6}")
 
-<<<<<<< Updated upstream
         # ── 5. Create AD user ─────────────────────────────────────────────────
-=======
-        # ── 7. Create AD user (UNTOUCHED) ─────────────────────────────────────
->>>>>>> Stashed changes
         step(True, "Creating Active Directory user…")
         if data.get("manager_upn"):
             data["ad_manager_dn"] = self.ad.get_manager_dn(data["manager_upn"]) or ""
         ok7, result7 = self.ad.create_user(data)
         if not ok7:
             step(False, f"AD creation error: {result7}")
-<<<<<<< Updated upstream
             # Don't return — continue with retries even if AD fails
-=======
->>>>>>> Stashed changes
             sam = None
         else:
             sam = result7
+            data["sam_account_name"] = sam
             step(ok7, f"AD user created: {sam}")
 
-<<<<<<< Updated upstream
         # ── 6. AD Proxy addresses ────────────────────────────────────────────
-=======
-        # ── 8. AD Proxy addresses (UNTOUCHED) ────────────────────────────────
->>>>>>> Stashed changes
-        if sam and emp_id:
-            ok8, m8 = self.ad.set_proxy_addresses(sam, data["email"], emp_id)
-            step(ok8, f"AD Proxy addresses: {m8 or 'Set'}")
+        if sam and (emp_id or retry_alias == "AD_FALLBACK"):
+            # Set primary and alias in AD
+            addrs = [f"SMTP:{data['email']}"]
+            if o365_alias:
+                addrs.append(f"smtp:{o365_alias}")
+            ok8, m8 = self.ad.set_proxy_addresses(sam, addrs)
+            step(ok8, f"AD Proxy addresses: {m8}")
 
-<<<<<<< Updated upstream
-        # ── 7. AD groups ──────────────────────────────────────────────────────
-=======
-        # ── 9. AD groups (UNTOUCHED) ──────────────────────────────────────────
->>>>>>> Stashed changes
+        # ── 7. AD groups & O365 Fallback ──────────────────────────────────────
         if sam:
+            # Standard AD groups
             for gname, gdn in data.get("ad_groups", []):
-                ok9, m9 = self.ad.add_to_group(sam, gdn)
-                step(ok9, f"AD group '{gname}': {m9 or 'OK'}")
+                ok9, m9 = self.ad.add_user_to_group(sam, gdn)
+                step(ok9, f"AD group '{gname}': {m9}")
+            
+            # No fallback to AD for O365 groups (per user clarification they are different)
+            pass
 
-<<<<<<< Updated upstream
         # ══════════════════════════════════════════════════════════════════════
         # ── 8. RETRY failed O365 operations ──────────────────────────────────
         # By now, more time has passed since license assignment (AD creation
         # took 10-30s), so the Exchange mailbox is more likely to be ready.
         # ══════════════════════════════════════════════════════════════════════
+        # ── 8. RETRY failed O365 operations ──────────────────────────────────
         needs_retry = retry_alias or retry_groups
         if needs_retry:
             step(True, "")
@@ -1151,35 +1269,29 @@ class UserForm(tk.Frame):
                 step(mbx_ok, f"Mailbox re-check: {'ready ✔' if mbx_ok else mbx_msg}")
 
             # Retry alias
-            if retry_alias and o365_alias:
+            if retry_alias is True and o365_alias:
                 step(True, "🔄 Retrying O365 alias…")
                 al_ok2, al_msg2 = self.o365.add_o365_alias(user_id, o365_alias)
                 step(al_ok2, f"O365 alias retry: {al_msg2}")
 
-            # Retry groups
+            # Retry groups - Batch processed
             if retry_groups:
                 step(True, f"🔄 Retrying {len(retry_groups)} failed group(s)…")
-                for gid, gname in retry_groups:
-                    ok5r, m5r = self.o365.add_to_group(user_id, gid)
-                    step(ok5r, f"Group retry '{gname}': {m5r}")
-=======
-        # ── 10. RETRY failed O365 operations after AD creation ────────────────
-        if retry_alias or retry_groups:
-            step(True, "")
-            step(True, "═══ Retrying failed O365 operations after AD creation ═══")
-            if not mbx_ok:
-                step(True, "⏳ Re-checking Exchange mailbox…")
-                mbx_ok, _ = self.o365.wait_for_mailbox(user_id, max_wait=60)
-                step(mbx_ok, f"Mailbox: {'ready ✔' if mbx_ok else 'still not ready'}")
+                o365_retries = [(gid, gname) for is_o365, gid, gname in retry_groups if is_o365]
+                if o365_retries:
+                    results = self.o365.add_to_groups_multi(user_id, o365_retries, admin_upn=admin_upn)
+                    for gname, ok, msg in results:
+                        step(ok, f"Group retry '{gname}': {msg}")
 
-            if retry_alias and o365_alias:
-                al2_ok, al2_msg = self.o365.add_o365_alias(user_id, o365_alias)
-                step(al2_ok, f"Alias retry: {al2_msg}")
+        # ── 9. MFA — skipped (per user request) ─────────────────────────────────────────
+        # if data.get("enable_mfa"):
+        #     ...
+        pass
 
-            for gid, gname in retry_groups:
-                ok5r, m5r = self.o365.add_to_group(user_id, gid)
-                step(ok5r, f"Group retry '{gname}': {m5r}")
->>>>>>> Stashed changes
+        # ── 10. Welcome Email ─────────────────────────────────────────────────
+        if self.v_send_email.get():
+            data["sam_account_name"] = sam if sam else "Unknown"
+            self._send_welcome_email(data, step)
 
         self.after(0, lambda: self._done(
             True, f"User '{data['email']}' created in O365 & AD!", log))
@@ -1232,3 +1344,72 @@ class UserForm(tk.Frame):
 
         ttk.Button(win, text="Close", command=win.destroy
                    ).pack(pady=(4, 16))
+
+    # ────────────────────────────────────────────────────────────────────────────────
+    #  Hierarchical OU & Group Selection Logic
+    # ────────────────────────────────────────────────────────────────────────────────
+
+    def _on_location_selected(self, *_):
+        idx = self._ou_cb.current()
+        if idx < 0: return
+        name, dn = self._all_ad_ous[idx]
+        self.v_location.set(name)
+        # Fetch sub-OUs
+        threading.Thread(target=self._fetch_sub_ous, args=(dn,), daemon=True).start()
+
+    def _fetch_sub_ous(self, parent_dn):
+        sub_ous = self.ad.get_ous(base=parent_dn, scope='OneLevel')
+        self._sub_ous = [(o.get('Name', ''), o.get('DistinguishedName', '')) for o in sub_ous]
+        names = [o[0] for o in self._sub_ous]
+        if not names:
+            self.after(0, lambda: self.v_sub_ou.set('No sub-OUs found'))
+            self.after(0, lambda: self._sub_ou_cb.configure(values=[]))
+        else:
+            self.after(0, lambda: self._sub_ou_cb.configure(values=names))
+            self.after(0, lambda: self.v_sub_ou.set('Select department...'))
+
+    def _on_sub_ou_selected(self, *_):
+        pass # The value is already in v_sub_ou
+
+    def _update_o365_sel_display(self, *_):
+        self._update_sel_list(self._grp_lb, self._all_groups, self._o365_sel_frame)
+
+    def _update_ad_sel_display(self, *_):
+        self._update_sel_list(self._ad_grp_lb, self._all_ad_groups, self._ad_sel_frame)
+
+    def _update_sel_list(self, lb, all_items, frame):
+        # Clear frame
+        for w in frame.winfo_children(): w.destroy()
+        indices = lb.curselection()
+        if not indices:
+            tk.Label(frame, text='(None selected)', bg=C['surface'], fg=C['text_dim'], font=F['body_sm']).pack(side='left')
+            return
+        
+        for idx in indices:
+            # We need to map the listbox index back to the filtered items if filtered
+            # but for now let's assume we use the display text
+            text = lb.get(idx)
+            lbl = tk.Label(frame, text=text, bg=C['accent_dim'], fg=C['text'], 
+                           padx=6, pady=2, font=F['body_sm'])
+            lbl.pack(side='left', padx=2, pady=2)
+
+    # ────────────────────────────────────────────────────────────────────────────────
+    #  Email Sending
+    # ────────────────────────────────────────────────────────────────────────────────
+
+    def _send_welcome_email(self, user_data, step):
+        if not self.v_send_email.get(): return
+        
+        step(True, '📧 Sending welcome email...')
+        sender = self.v_mail_sender.get()
+        pwd = self.v_mail_pwd.get()
+        cc = self.v_mail_cc.get()
+        
+        if not pwd:
+            step(False, 'Email skipped: Sender password not provided')
+            return
+
+        ok, msg = self.mail.send_welcome_email(sender, pwd, 
+                                              user_data.get('receiver_email') or user_data['email'], 
+                                              cc, user_data)
+        step(ok, msg)

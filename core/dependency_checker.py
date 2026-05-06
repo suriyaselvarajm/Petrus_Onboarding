@@ -71,6 +71,8 @@ def check_az_logged_in() -> bool:
 def do_az_login() -> None:
     """Open a new console window for az login."""
     try:
+        # Disable WAM to force standard browser login (allows picking account)
+        subprocess.run("az config set core.authenticate_using_wam=false", shell=True, capture_output=True)
         subprocess.Popen(
             "az login",
             shell=True,
