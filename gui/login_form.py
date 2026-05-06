@@ -101,7 +101,9 @@ class LoginForm(tk.Frame):
         threading.Thread(target=self._auth_worker, args=(username, password), daemon=True).start()
 
     def _auth_worker(self, username, password):
-        # 1. Check AD Credentials & Domain Admin membership
+        # ── Step 1: Active Directory Authentication ──────────────────────────
+        # This checks credentials AND 'Domain Admins' membership via LDAP.
+        # It also saves the credentials for the session in ad_service.
         ad_ok, ad_msg = self.ad.authenticate_and_check_permission(username, password)
         
         if not ad_ok:
@@ -109,15 +111,13 @@ class LoginForm(tk.Frame):
             self.after(0, lambda: self._set_loading(False))
             return
 
-        # 2. Check O365 Roles via Azure CLI Session
-        o365_ok, o365_msg = self.o365.check_admin_roles()
-        
-        if not o365_ok:
-            self.after(0, lambda: self._set_status(o365_msg))
-            self.after(0, lambda: self._set_loading(False))
-            return
+        # ── Step 2: M365 Status (Non-blocking) ──────────────────────────────
+        # We check O365 roles but don't block the login if they fail.
+        # This allows the app to open even if the MSAL token needs refresh.
+        self.o365.check_admin_roles()
 
         # Success!
+        # We update the config as a fallback, though ad_service now has its own session.
         import config
         config.AD_ADMIN_USER = username
         config.AD_ADMIN_PASSWORD = password

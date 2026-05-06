@@ -78,29 +78,36 @@ MFA_RETRY_COUNT = 3         # Number of attempts for MFA enablement
 
 # ── AD Group Search ──────────────────────────────────────────────────────────
 # Base path for security groups shown in the AD selection
-AD_GROUPS_BASE_OU = "OU=AD Use,OU=DL,OU=Petrus-Users,DC=petrus,DC=local"
+# We search recursively under Petrus-Users to ensure all groups are found
+AD_GROUPS_BASE_OU = "OU=Petrus-Users,DC=petrus,DC=local"
 
 # ── Email Notification ────────────────────────────────────────────────────────
 DEFAULT_EMAIL_SENDER = "itsupport@petrustechnologies.com"
 DEFAULT_EMAIL_CC     = "it@petrustechnologies.com"
 WELCOME_EMAIL_SUBJECT = "Welcome to Petrus Technologies - Account Details"
 WELCOME_EMAIL_TEMPLATE = """Hi {first_name},
-Welcome to Petrus Technologies! We are excited to have you join our team.
-To help you get started, here are your account details:
 
-[ Petrus Accounts ]
-• Email (M365): {email}
-• System Login: {sam_account_name}
-• Password: {password}
+Welcome to Petrus Technologies! We're excited to have you join our team and look forward to supporting you as you begin your journey with us.
+To help you get started, please find your account details below:
 
-Log in here: https://www.office.com
+Petrus Email Account (Microsoft 365):
+• Username: {email}
+• Temporary Password: {password}
+
+You can log in at: https://www.office.com
+
+Petrus System Login:
+• Username: {sam_account_name}
+• Password: Same as above
 
 For security reasons, you will be prompted to change your password upon your first login.
-If you need any assistance, please reach out to the IT team. We're here to help!
+If you encounter any issues or need assistance during setup, please don't hesitate to reach out to the IT team. We're here to help ensure a smooth onboarding experience.
 
-Best Regards,
-IT Team | 638 4164 343
-Petrus Technologies
+Once again, welcome aboard—we're glad to have you with us!
+
+Warm Regards
+IT Team
+638 4164 343
 """
 
 OFFBOARDING_EMAIL_SUBJECT = "Action Required: Data Confirmation for Off-boarding - {name}"

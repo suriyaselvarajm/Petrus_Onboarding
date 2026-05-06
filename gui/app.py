@@ -411,6 +411,9 @@ class OnboardingApp:
             self._login_form = None
         self._form_shown = False # reset so it correctly triggers _show_selection
         self._show_selection()
+        
+        # Automatically refresh connection status now that we have credentials
+        self._refresh()
 
     def _show_selection(self):
         self._form_shown = True
