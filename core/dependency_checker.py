@@ -1,13 +1,5 @@
-"""
-core/dependency_checker.py
-Checks and installs all required dependencies on startup.
-"""
-
-import subprocess
 import sys
 import importlib
-import shutil
-import json
 from typing import Callable, List, Tuple
 
 # (import_name, pip_install_spec)
@@ -21,22 +13,7 @@ PYTHON_DEPS: List[Tuple[str, str]] = [
     ("ldap3",       "ldap3>=2.9.1"),
 ]
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _run(cmd_list: List[str], timeout: int = 60) -> Tuple[bool, str, str]:
-    """Run a process without shell=True to avoid EDR blocks."""
-    try:
-        r = subprocess.run(
-            cmd_list, capture_output=True, text=True,
-            timeout=timeout
-        )
-        return r.returncode == 0, r.stdout.strip(), r.stderr.strip()
-    except Exception as e:
-        return False, "", str(e)
-
-
-# ── Individual checks ──────────────────────────────────────────────────────────
 
 def check_python_package(import_name: str) -> bool:
     try:
@@ -44,19 +21,6 @@ def check_python_package(import_name: str) -> bool:
         return True
     except ImportError:
         return False
-
-
-def install_python_package(pip_spec: str, log: Callable = print) -> bool:
-    if getattr(sys, 'frozen', False):
-        log(f"  [ERROR] Cannot install {pip_spec} in bundled EXE. Must be included in build.")
-        return False
-
-    log(f"  pip install {pip_spec} ...")
-    cmd = [sys.executable, "-m", "pip", "install", pip_spec, "--quiet"]
-    ok, out, err = _run(cmd, timeout=120)
-    if not ok:
-        log(f"  ERROR: {err or out}")
-    return ok
 
 
 # ── Dependency Check Orchestrator ──────────────────────────────────────────────
@@ -88,12 +52,8 @@ class DependencyCheck:
             if check_python_package(import_name):
                 self._p(pct, f"[OK] {pip_spec}")
             else:
-                self._p(pct, f"[Installing] {pip_spec}")
-                if install_python_package(pip_spec, self.log_cb):
-                    self._p(pct, f"[OK] {pip_spec} installed")
-                else:
-                    self.issues.append(f"Failed to install {pip_spec}")
-                    self._p(pct, f"[ERROR] Could not install {pip_spec}")
+                self.issues.append(f"Missing {pip_spec}")
+                self._p(pct, f"[ERROR] Missing {pip_spec}")
         return current_step
 
     def _check_o365_auth(self, steps: int, current_step: int) -> int:

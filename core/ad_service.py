@@ -222,7 +222,6 @@ class ADService:
             'mail': email,
             'title': data.get("job_title", ""),
             'department': data.get("department", ""),
-            'physicalDeliveryOfficeName': data.get("office", "Coimbatore"),
             'mobile': data.get("mobile", ""),
             'streetAddress': data.get("street", ""),
             'l': data.get("city", "Coimbatore"),
@@ -234,7 +233,7 @@ class ADService:
             'company': COMPANY_NAME,
             'employeeID': data.get("employee_id", ""),
             'employeeNumber': data.get("employee_id", ""),
-            'description': f'Created by Petrus Onboarding Tool on {os.name}'
+            'userAccountControl': '512'
         }
         
         if manager_dn:

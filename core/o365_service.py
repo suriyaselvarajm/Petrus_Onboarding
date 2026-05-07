@@ -797,71 +797,11 @@ class O365Service:
         if not remaining:
             return results
 
-        # 2. For those that failed Graph (likely DLs), use ONE PowerShell session
-        # We use a hardened subprocess call (list-based, no shell=True) to avoid EDR blocks.
-        group_data = [] # List of (email, name)
-        for gid, gname in remaining:
-            email = gid
-            try:
-                r = self._get(f"{GRAPH_BASE}/groups/{gid}?$select=mail")
-                if r.status_code == 200:
-                    email = r.json().get("mail") or gid
-            except Exception: pass
-            group_data.append((email, gname))
-
-        # Build a script that iterates through groups
-        ps_groups_array = ", ".join([f"'{e}'" for e, _ in group_data])
-        ps_names_array  = ", ".join([f"'{n}'" for _, n in group_data])
+        # Method 2: PowerShell fallback removed to prevent SentinelOne blocks.
+        # Distribution Lists that cannot be added via Graph API must be managed in AD.
+        for _, gname in remaining:
+            results.append((gname, False, "Graph API failed (DL/Mail-Sec); manual action required"))
         
-        upn = self._get_upn(user_id)
-        exo_token = cred_manager.get_token(SCOPES_EXO)
-        if exo_token:
-            auth_param = f"-AccessToken '{exo_token}' -Organization '{EMAIL_DOMAIN}'"
-        else:
-            auth_param = "" # Best effort without token; may trigger interactive login if not careful
-        
-        ps_script = (
-            "$ErrorActionPreference = 'Stop'\n"
-            "try {\n"
-            "    Import-Module ExchangeOnlineManagement -ErrorAction SilentlyContinue\n"
-            f"    if (-not (Get-ConnectionInformation)) {{ Connect-ExchangeOnline {auth_param} -ErrorAction SilentlyContinue }}\n"
-            f"    $emails = @({ps_groups_array})\n"
-            f"    $names  = @({ps_names_array})\n"
-            f"    for ($i=0; $i -lt $emails.Length; $i++) {{\n"
-            "        try {\n"
-            f"            Add-DistributionGroupMember -Identity $emails[$i] -Member '{upn}' -ErrorAction Stop\n"
-            "            Write-Output \"SUCCESS:$($names[$i])\"\n"
-            "        } catch {\n"
-            "            Write-Output \"ERROR:$($names[$i]):$($_.Exception.Message)\"\n"
-            "        }\n"
-            "    }\n"
-            "} catch {\n"
-            "    Write-Output \"GLOBAL_ERROR:$($_.Exception.Message)\"\n"
-            "}\n"
-        )
-        
-        import subprocess as _sp
-        try:
-            r_ps = _sp.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-                capture_output=True, text=True, timeout=90
-            )
-            out = r_ps.stdout
-            for _, gname in remaining:
-                if f"SUCCESS:{gname}" in out:
-                    results.append((gname, True, "Added via Exchange PS"))
-                elif f"ERROR:{gname}:" in out:
-                    msg = out.split(f"ERROR:{gname}:", 1)[1].split("\n")[0].strip()
-                    results.append((gname, "already" in msg.lower(), f"PS Error: {msg[:100]}"))
-                elif "GLOBAL_ERROR:" in out:
-                    msg = out.split("GLOBAL_ERROR:", 1)[1].strip()
-                    results.append((gname, False, f"PS Connection Error: {msg[:100]}"))
-                else:
-                    results.append((gname, False, "PS fallback failed"))
-        except Exception as e:
-            for _, gname in remaining:
-                results.append((gname, False, f"Process Error: {str(e)}"))
-
         return results
 
     def add_to_group(self, user_id: str, group_id: str, admin_upn: str = "", skip_ps: bool = False) -> Tuple[bool, str]:

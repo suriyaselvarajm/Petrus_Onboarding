@@ -69,7 +69,6 @@ class OnboardingApp:
         self._dep_status: Dict[str, bool] = {"az": True, "ad": True}
 
         self._build_ui()
-        self._check_system_dependencies()
         self._start_checks()
 
     # ── UI Construction ───────────────────────────────────────────────────────
@@ -94,14 +93,6 @@ class OnboardingApp:
                    command=self._refresh).pack(side="right", padx=8, pady=4)
         # Hidden by default; shown when AD fails
 
-        # Dependency warning banner
-        self._dep_warn = tk.Frame(self.root, bg=C["error"])
-        self._dep_warn_lbl = tk.Label(
-            self._dep_warn, text="",
-            bg=C["error"], fg="#FFFFFF", font=F["body_sm"]
-        )
-        self._dep_warn_lbl.pack(side="left", padx=12, pady=6)
-        
         # Loading placeholder (shown while O365 is still connecting)
         self._loading_lbl = tk.Label(
             self._content,
@@ -189,7 +180,7 @@ class OnboardingApp:
 
         dot("o365");  tag("O365: Connecting…", "o365");  sep()
         dot("ad");    tag("AD: Connecting…",   "ad");    sep()
-        self._sync_lbl = tk.Label(sb, text="AD Sync: Checking…",
+        self._sync_lbl = tk.Label(sb, text="AD Sync: Status Unknown",
                                    bg=C["surface2"], fg=C["text_muted"],
                                    font=F["status"])
         self._sync_lbl.pack(side="left", padx=12, pady=4)
@@ -199,52 +190,7 @@ class OnboardingApp:
                                    font=F["status"])
         self._time_lbl.pack(side="right", padx=14, pady=4)
 
-    # ── Dependency Check ──────────────────────────────────────────────────────
-
-    def _check_system_dependencies(self):
-        """Check for Azure CLI and AD PowerShell modules in background."""
-        def run():
-            import subprocess
-            import os
-            az_ok = False
-            ad_ok = False
-            
-            # 1. Try 'az --version' with shell=True for Windows resolution
-            try:
-                subprocess.run(["az", "--version"], shell=True, capture_output=True, check=True)
-                az_ok = True
-            except Exception:
-                # Fallback: check if az exists in path via where
-                try:
-                    subprocess.run(["where", "az"], shell=True, capture_output=True, check=True)
-                    az_ok = True
-                except Exception: pass
-            
-            # 2. Try AD module check
-            try:
-                out = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Module -ListAvailable ActiveDirectory"], 
-                                     capture_output=True, text=True, shell=True)
-                if "ActiveDirectory" in out.stdout:
-                    ad_ok = True
-            except Exception: pass
-            
-            self._dep_status = {"az": az_ok, "ad": ad_ok}
-            self.root.after(0, self._apply_dep_warning)
-            
-        threading.Thread(target=run, daemon=True).start()
-
-    def _apply_dep_warning(self):
-        if self._dep_status["az"] and self._dep_status["ad"]:
-            self._dep_warn.pack_forget()
-            return
-        
-        missing = []
-        if not self._dep_status["az"]: missing.append("Azure CLI (az)")
-        if not self._dep_status["ad"]: missing.append("AD PowerShell Module")
-        
-        self._dep_warn_lbl.configure(text=f"⚠  Missing Dependencies: {', '.join(missing)}. "
-                                          "Some features may not work. Please install required tools.")
-        self._dep_warn.pack(fill="x", side="top", before=self._topbar)
+    # ── Theme Toggle ──────────────────────────────────────────────────────────
 
     # ── Theme Toggle ──────────────────────────────────────────────────────────
 
