@@ -12,7 +12,9 @@ from config import APP_TITLE, APP_VERSION, COMPANY_NAME
 from gui.styles import C, F, apply_theme
 from gui.user_form import UserForm
 from gui.offboarding_form import OffboardingForm
+from gui.profile_update_form import ProfileUpdateForm
 from gui.login_form import LoginForm
+from gui.settings_form import SettingsForm
 from core.o365_service import O365Service
 from core.ad_service import ADService
 from core.connection_manager import ConnectionManager, ConnectionStatus
@@ -151,10 +153,29 @@ class OnboardingApp:
                                     command=self._toggle_theme)
         self._theme_btn.pack(side="right", padx=(4, 18), pady=12)
 
+        ttk.Button(bar, text="🚪  Logout",
+                   style="Secondary.TButton",
+                   command=self._logout
+                   ).pack(side="right", padx=4, pady=12)
+
         ttk.Button(bar, text="⟳  Refresh Connections",
                    style="Secondary.TButton",
                    command=self._refresh
                    ).pack(side="right", padx=4, pady=12)
+
+        self._settings_btn = ttk.Button(bar, text="⚙️  Settings",
+                   style="Secondary.TButton",
+                   command=self._launch_settings
+                   )
+        # Hidden initially; shown after login in _on_login_success
+        # self._settings_btn.pack(side="right", padx=4, pady=12)
+
+    def _logout(self):
+        from tkinter import messagebox
+        from core.credential_manager import cred_manager
+        if messagebox.askyesno("Logout", "Are you sure you want to log out of M365?\n\nThe application will close and you will need to restart to log in again.", parent=self.root):
+            cred_manager.logout()
+            self.root.destroy()
 
     def _build_statusbar(self):
         self._statusbar = tk.Frame(self.root, bg=C["surface2"], height=28)
@@ -192,8 +213,6 @@ class OnboardingApp:
 
     # ── Theme Toggle ──────────────────────────────────────────────────────────
 
-    # ── Theme Toggle ──────────────────────────────────────────────────────────
-
     def _toggle_theme(self):
         self._is_dark = not self._is_dark
         apply_theme(self.root, is_dark=self._is_dark)
@@ -208,15 +227,17 @@ class OnboardingApp:
         # Special handling for elements that need specific colors from C
         self._topbar.configure(bg=C["surface"])
         self._statusbar.configure(bg=C["surface2"])
-        # Update status bar dots and labels manually if needed, 
-        # but _update_widget_themes should handle most.
         
         # Refresh current form
         if self._form:
-            is_offboarding = isinstance(self._form, OffboardingForm)
-            self._form.destroy()
-            if is_offboarding: self._show_offboarding()
-            else: self._show_form()
+            if isinstance(self._form, OffboardingForm):
+                self._form.destroy(); self._show_offboarding()
+            elif isinstance(self._form, ProfileUpdateForm):
+                self._form.destroy(); self._show_profile_update()
+            elif isinstance(self._form, SettingsForm):
+                self._form.destroy(); self._show_settings()
+            else:
+                self._form.destroy(); self._show_form()
         elif hasattr(self, "_sel_frame"):
             self._sel_frame.destroy()
             self._show_selection()
@@ -234,14 +255,12 @@ class OnboardingApp:
             try:
                 # Update standard widgets
                 if wtype == "Frame":
-                    # Check if it's a card or bar
-                    # This is tricky without tags, but we can guess by parent or current color
                     curr_bg = child.cget("bg").upper()
                     if curr_bg in ["#FFFFFF", "#1E293B"]: # Surface colors
                         child.configure(bg=C["surface"])
                     elif curr_bg in ["#E8EDF2", "#334155"]: # Surface2 colors
                         child.configure(bg=C["surface2"])
-                    elif curr_bg not in ["#DC2626", "#EF4444", "#D97706", "#F59E0B"]: # Don't change error/warning banners
+                    elif curr_bg not in ["#DC2626", "#EF4444", "#D97706", "#F59E0B"]:
                         child.configure(bg=C["bg"])
                         
                 elif wtype == "Label":
@@ -280,8 +299,6 @@ class OnboardingApp:
     # ── Status update (called from background thread via conn_mgr) ────────────
 
     def _on_status_update(self, status: ConnectionStatus):
-        # Schedule on main thread — this method is called from a background thread.
-        # root.after() is safe to call cross-thread (it posts to the event queue).
         try:
             self.root.after(0, lambda s=status: self._apply_status(s))
         except RuntimeError:
@@ -301,14 +318,11 @@ class OnboardingApp:
         if status.ad_connected:
             self.ad_dot.configure(fg=C["success"])
             self.ad_lbl.configure(text=f"AD: {status.ad_message}", fg=C["success"])
-            # Hide the AD warning banner if it was showing
             self._ad_warn.pack_forget()
         else:
             self.ad_dot.configure(fg=C["error"])
             self.ad_lbl.configure(text=f"AD: {status.ad_message}", fg=C["error"])
-            # Show AD warning banner in content area (if form is already visible)
             if self._form_shown:
-                # Truncate long PS error to keep the banner tidy
                 short_err = status.ad_message.split("\n")[0][:120]
                 self._ad_warn_lbl.configure(
                     text=f"⚠  AD: {short_err}  —  AD user creation disabled until reconnected.")
@@ -325,8 +339,6 @@ class OnboardingApp:
             self._time_lbl.configure(text=f"Last checked: {t}")
 
         # ── Form display logic ────────────────────────────────────────────────
-        # Show form as soon as O365 is connected.
-        # AD being disconnected just shows a warning banner — doesn't block the form.
         if status.o365_connected and not self._form_shown:
             if not self._is_authenticated:
                 self._show_login()
@@ -355,10 +367,12 @@ class OnboardingApp:
         if self._login_form:
             self._login_form.destroy()
             self._login_form = None
-        self._form_shown = False # reset so it correctly triggers _show_selection
-        self._show_selection()
         
-        # Automatically refresh connection status now that we have credentials
+        # Show settings button now that we are authenticated
+        self._settings_btn.pack(side="right", padx=4, pady=12)
+        
+        self._form_shown = False
+        self._show_selection()
         self._refresh()
 
     def _show_selection(self):
@@ -395,6 +409,24 @@ class OnboardingApp:
                             command=self._launch_offboarding)
         off_btn.pack(side="left", padx=20)
 
+        # Profile Update Button
+        prof_btn = tk.Button(btn_frame, text="✏️\n\nUpdate\nEmployee Profile",
+                             font=("Segoe UI", 16, "bold"),
+                             bg=C["surface"], fg=C["text_muted"],
+                             activebackground=C["surface2"], activeforeground=C["text"],
+                             relief="flat", bd=0, width=20, height=10,
+                             command=self._launch_profile_update)
+        prof_btn.pack(side="left", padx=20)
+
+        # Settings Button
+        sett_btn = tk.Button(btn_frame, text="⚙️\n\nApplication\nSettings",
+                             font=("Segoe UI", 16, "bold"),
+                             bg=C["surface"], fg=C["text_dim"],
+                             activebackground=C["surface2"], activeforeground=C["text"],
+                             relief="flat", bd=0, width=20, height=10,
+                             command=self._launch_settings)
+        sett_btn.pack(side="left", padx=20)
+
     def _launch_onboarding(self):
         self._sel_frame.destroy()
         self._show_form()
@@ -402,6 +434,23 @@ class OnboardingApp:
     def _launch_offboarding(self):
         self._sel_frame.destroy()
         self._show_offboarding()
+
+    def _launch_profile_update(self):
+        self._sel_frame.destroy()
+        self._show_profile_update()
+
+    def _launch_settings(self):
+        # Basic security check
+        if not self._is_authenticated:
+            from tkinter import messagebox
+            messagebox.showwarning("Access Denied", "Please log in to access settings.")
+            return
+
+        if hasattr(self, "_sel_frame") and self._sel_frame:
+            self._sel_frame.destroy()
+        if self._form:
+            self._form.destroy()
+        self._show_settings()
 
     def _show_form(self):
         self._form = UserForm(self._content, self.o365, self.ad, on_back=self._reset_to_home)
@@ -411,12 +460,19 @@ class OnboardingApp:
         self._form = OffboardingForm(self._content, self.o365, self.ad, on_back=self._reset_to_home)
         self._form.pack(fill="both", expand=True)
 
+    def _show_profile_update(self):
+        self._form = ProfileUpdateForm(self._content, self.o365, self.ad, on_back=self._reset_to_home)
+        self._form.pack(fill="both", expand=True)
+
+    def _show_settings(self):
+        self._form = SettingsForm(self._content, on_back=self._reset_to_home)
+        self._form.pack(fill="both", expand=True)
+
     def _reset_to_home(self):
         if self._form:
             self._form.destroy()
             self._form = None
         
-        # Clean up selection frame if it somehow exists
         if hasattr(self, "_sel_frame") and self._sel_frame:
             try:
                 self._sel_frame.destroy()
@@ -425,8 +481,10 @@ class OnboardingApp:
 
         self._form_shown = False
         
-        # Show selection screen immediately
-        self._show_selection()
+        # Security check: only show selection if authenticated
+        if self._is_authenticated:
+            self._show_selection()
+        else:
+            self._show_login()
         
-        # Refresh status in background
         threading.Thread(target=self.conn_mgr.check_all, daemon=True).start()

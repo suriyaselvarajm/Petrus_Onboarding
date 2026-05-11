@@ -18,12 +18,13 @@ from config import (
     COMPANY_NAME, EMAIL_DOMAIN, AD_PETRUS_USERS_OU,
     DEFAULT_CITY, DEFAULT_STATE, DEFAULT_ZIP,
     DEFAULT_COUNTRY, DEFAULT_STREET, DEFAULT_OFFICE,
-    LICENSE_OPTIONS, EMPLOYEE_TYPES,
+    LICENSE_OPTIONS, EMPLOYEE_TYPES, DEPARTMENTS,
     LICENSE_SKU_MAP, MAILBOX_WAIT_SECONDS,
     DEFAULT_EMAIL_SENDER, DEFAULT_EMAIL_CC,
 )
 from core.mail_service import MailService
 from core.credential_manager import save_password, get_password
+from core.settings_manager import sm
 from gui.styles import C, F
 
 
@@ -71,6 +72,7 @@ class _ScrollableFrame(tk.Frame):
                 pass # Widget was destroyed during event processing
 
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self.bind("<Destroy>", lambda _: self.unbind_all("<MouseWheel>"))
 
 
 def _section(parent: tk.Widget, title: str, icon: str = "") -> tk.Frame:
@@ -282,36 +284,44 @@ class UserForm(tk.Frame):
         card.columnconfigure(0, weight=1)
         card.columnconfigure(1, weight=1)
 
-        # Helper to add a label+entry pair
+        # Helper to add a label+entry/combo pair
         def field(label, attr, row, col, default="", required=False,
-                  padx_lbl=(12,6), padx_ent=(12,6), span=1):
+                  padx_lbl=(12,6), padx_ent=(12,6), span=1, values=None):
             _grid_lbl(card, label, row, col, span, required=required, padx=padx_lbl)
             var = tk.StringVar(value=default)
             setattr(self, attr, var)
-            ttk.Entry(card, textvariable=var, font=F["body"]).grid(
-                row=row+1, column=col, columnspan=span, sticky="ew",
-                padx=padx_ent, pady=(0, 6))
+            if values:
+                cb = ttk.Combobox(card, textvariable=var, values=values, font=F["body"])
+                cb.grid(row=row+1, column=col, columnspan=span, sticky="ew",
+                        padx=padx_ent, pady=(0, 6))
+                # Set default to first value if provided and no default exists
+                if not default and values:
+                    var.set(values[0])
+            else:
+                ttk.Entry(card, textvariable=var, font=F["body"]).grid(
+                    row=row+1, column=col, columnspan=span, sticky="ew",
+                    padx=padx_ent, pady=(0, 6))
 
         field("Job Title",        "v_job_title", 0, 0, padx_lbl=(12,6), padx_ent=(12,6))
-        field("Department",       "v_dept",      0, 1, padx_lbl=(6,12), padx_ent=(6,12))
-        field("Office Location",  "v_office",    2, 0, DEFAULT_OFFICE,
+        field("Department",       "v_dept",      0, 1, values=sm.get("departments"), padx_lbl=(6,12), padx_ent=(6,12))
+        field("Office Location",  "v_office",    2, 0, sm.get("default_office"),
               padx_lbl=(12,6), padx_ent=(12,6))
         field("Mobile Phone",     "v_mobile",    2, 1, required=True,
               padx_lbl=(6,12), padx_ent=(6,12))
 
         # Street address spans both columns
         _grid_lbl(card, "Street Address", 4, 0, span=2, padx=(12,12))
-        self.v_street = tk.StringVar(value=DEFAULT_STREET)
+        self.v_street = tk.StringVar(value=sm.get("default_street"))
         ttk.Entry(card, textvariable=self.v_street, font=F["body"]).grid(
             row=5, column=0, columnspan=2, sticky="ew", padx=(12,12), pady=(0,6))
 
-        field("City",             "v_city",   6, 0, DEFAULT_CITY,
+        field("City",             "v_city",   6, 0, sm.get("default_city"),
               padx_lbl=(12,6), padx_ent=(12,6))
-        field("State / Province", "v_state",  6, 1, DEFAULT_STATE,
+        field("State / Province", "v_state",  6, 1, sm.get("default_state"),
               padx_lbl=(6,12), padx_ent=(6,12))
-        field("ZIP / Postal Code","v_zip",    8, 0, DEFAULT_ZIP,
+        field("ZIP / Postal Code","v_zip",    8, 0, sm.get("default_zip"),
               padx_lbl=(12,6), padx_ent=(12,6))
-        field("Country",          "v_country",8, 1, DEFAULT_COUNTRY,
+        field("Country",          "v_country",8, 1, sm.get("default_country"),
               padx_lbl=(6,12), padx_ent=(6,12))
 
         tk.Frame(card, bg=C["surface"], height=8).grid(row=10, column=0, columnspan=2)
@@ -586,6 +596,16 @@ class UserForm(tk.Frame):
                    command=self._clear_form
                    ).pack(side="right", padx=(4, 16), pady=12)
 
+        ttk.Button(bar, text="📄 Bulk Import CSV",
+                   style="Secondary.TButton",
+                   command=self._on_bulk_import
+                   ).pack(side="right", padx=4, pady=12)
+
+        ttk.Button(bar, text="⬇️ Template",
+                   style="Secondary.TButton",
+                   command=self._download_csv_template
+                   ).pack(side="right", padx=4, pady=12)
+
         self._submit_btn = ttk.Button(
             bar, text="  🚀  Create User in O365 & AD  ",
             command=self._on_submit)
@@ -608,43 +628,23 @@ class UserForm(tk.Frame):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _generate_password(self):
-        """Helper to generate a strong password and update the UI."""
+        """Helper to generate a strong password (16 chars) and update the UI."""
         import secrets
         import string
-        length = 12
-        alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+        length = 16
+        # Guaranteed characters to meet complexity requirements
         pwd_list = [
             secrets.choice(string.ascii_lowercase),
             secrets.choice(string.ascii_uppercase),
             secrets.choice(string.digits),
-            secrets.choice("!@#$%^&*")
+            secrets.choice("!@#$*") # Common safe symbols
         ]
+        # Fill the rest
+        alphabet = string.ascii_letters + string.digits + "!@#$*"
         pwd_list += [secrets.choice(alphabet) for _ in range(length - 4)]
         secrets.SystemRandom().shuffle(pwd_list)
         pwd = "".join(pwd_list)
         
-        # Update the UI variable
-        if hasattr(self, "v_pwd"):
-            self.v_pwd.set(pwd)
-        return pwd
-
-    def _generate_password(self):
-        """Helper to generate a strong password and update the UI."""
-        import secrets
-        import string
-        length = 12
-        alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
-        pwd_list = [
-            secrets.choice(string.ascii_lowercase),
-            secrets.choice(string.ascii_uppercase),
-            secrets.choice(string.digits),
-            secrets.choice("!@#$%^&*")
-        ]
-        pwd_list += [secrets.choice(alphabet) for _ in range(length - 4)]
-        secrets.SystemRandom().shuffle(pwd_list)
-        pwd = "".join(pwd_list)
-        
-        # Update the UI variable
         if hasattr(self, "v_pwd"):
             self.v_pwd.set(pwd)
         return pwd
@@ -1122,6 +1122,142 @@ class UserForm(tk.Frame):
         data = self._collect()
         threading.Thread(target=self._run_creation, args=(data,), daemon=True).start()
 
+    def _download_csv_template(self):
+        from tkinter import filedialog, messagebox
+        import csv
+        
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            initialfile="Bulk_Onboard_Template.csv",
+            title="Save CSV Template",
+            filetypes=(("CSV Files", "*.csv"), ("All Files", "*.*"))
+        )
+        if not path:
+            return
+            
+        headers = [
+            "First Name", "Last Name", "Email", "Password", 
+            "Designation", "Department", "Mobile Number", 
+            "Reporting Manager UPN", "Employee ID"
+        ]
+        
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                writer.writerow(["John", "Doe", "john.doe@petrustechnologies.com", "Temp@12345", 
+                                 "IT Engineer", "IT", "1234567890", 
+                                 "admin@petrustechnologies.com", "EMP101"])
+            messagebox.showinfo("Success", f"Template saved successfully at:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save template:\n{e}")
+
+    def _on_bulk_import(self):
+        from tkinter import filedialog, messagebox
+        import csv
+        
+        if self.v_location.get() in ("", "Loading Locations...", "Select location..."):
+            messagebox.showerror("Validation Error", "Please select an AD Location first.\n\nThis location, along with your selected License and Groups, will apply to ALL users in the CSV.")
+            return
+            
+        file_path = filedialog.askopenfilename(
+            title="Select Bulk Onboard CSV",
+            filetypes=(("CSV Files", "*.csv"), ("All Files", "*.*"))
+        )
+        if not file_path:
+            return
+            
+        users_to_create = []
+        try:
+            with open(file_path, newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get("Email"): # Only process rows that have an email
+                        users_to_create.append(row)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to read CSV:\n{e}")
+            return
+            
+        if not users_to_create:
+            messagebox.showwarning("Warning", "The CSV file is empty or missing required columns.")
+            return
+            
+        msg = (f"Found {len(users_to_create)} users in the CSV.\n\n"
+               "They will be created sequentially using the Location, License, and Groups currently selected in the form.\n\n"
+               "Do you want to proceed?")
+        if not messagebox.askyesno("Confirm Bulk Import", msg):
+            return
+            
+        self._submit_btn.configure(state="disabled")
+        self._progress.pack(side="left", padx=8, pady=12)
+        self._progress.start(10)
+        self._status_lbl.configure(text=f"⏳ Processing 1 of {len(users_to_create)}…", fg=C["text_muted"])
+        
+        global_data = self._collect()
+        threading.Thread(target=self._run_bulk_creation, args=(users_to_create, global_data), daemon=True).start()
+
+    def _run_bulk_creation(self, csv_users: list, global_data: dict):
+        bulk_log = []
+        success_count = 0
+        
+        for idx, row in enumerate(csv_users, 1):
+            email = row.get("Email", "").strip()
+            first = row.get("First Name", "").strip()
+            last = row.get("Last Name", "").strip()
+            
+            # Map CSV row to data dict
+            user_data = global_data.copy()
+            user_data.update({
+                "first_name": first,
+                "last_name": last,
+                "email": email,
+                "password": row.get("Password", "").strip() or self._generate_password(),
+                "mail_nickname": f"{first.lower()}.{last.lower()}"[:48] if first and last else email.split('@')[0],
+                "job_title": row.get("Designation", "").strip(),
+                "department": row.get("Department", "").strip(),
+                "mobile": row.get("Mobile Number", "").strip(),
+                "employee_id": row.get("Employee ID", "").strip(),
+                "manager_upn": row.get("Reporting Manager UPN", "").strip(),
+                # Map manager_upn to manager_id if possible
+                "manager_id": None # Will be resolved if manager_upn exists
+            })
+            
+            if user_data["manager_upn"]:
+                # Try to find manager ID from upn
+                for mid, mname, mupn in self._all_managers:
+                    if mupn.lower() == user_data["manager_upn"].lower():
+                        user_data["manager_id"] = mid
+                        break
+            
+            if not email:
+                bulk_log.append((False, f"Row {idx} skipped: Missing Email"))
+                continue
+                
+            self.after(0, lambda i=idx, t=len(csv_users), e=email: self._status_lbl.configure(text=f"⏳ Processing {i}/{t}: {e}"))
+            
+            user_log = []
+            def step_cb(ok: bool, msg: str):
+                user_log.append((ok, msg))
+                
+            bulk_log.append((True, f"--- Starting {email} ---"))
+            
+            # Use core creation logic
+            try:
+                self._run_creation_core(user_data, user_log, step_cb)
+                bulk_log.extend(user_log)
+                # Check if O365 creation was successful
+                if any("O365 user created" in msg for ok, msg in user_log):
+                    success_count += 1
+            except Exception as e:
+                bulk_log.append((False, f"Critical error processing {email}: {e}"))
+                
+            bulk_log.append((True, "")) # empty line spacer
+            
+        self.after(0, lambda: self._done(
+            success_count == len(csv_users), 
+            f"Bulk Import Complete: {success_count}/{len(csv_users)} created.", 
+            bulk_log))
+
     def _run_creation(self, data: Dict[str, Any]):
         from config import LICENSE_SKU_MAP, MAILBOX_WAIT_SECONDS
         log: List[Tuple[bool, str]] = []
@@ -1132,6 +1268,14 @@ class UserForm(tk.Frame):
             self.after(0, lambda m=f"{icon} {msg}":
                 self._status_lbl.configure(
                     text=m, fg=C["text"] if ok else C["warning"]))
+
+        self._run_creation_core(data, log, step)
+        
+        self.after(0, lambda: self._done(
+            True, f"User '{data['email']}' created in O365 & AD!", log))
+
+    def _run_creation_core(self, data: Dict[str, Any], log: list, step):
+        from config import LICENSE_SKU_MAP, MAILBOX_WAIT_SECONDS
 
         # ── 1. Create O365 user ───────────────────────────────────────────────
         step(True, "Creating O365 user…")
@@ -1292,9 +1436,6 @@ class UserForm(tk.Frame):
         if self.v_send_email.get():
             data["sam_account_name"] = sam if sam else "Unknown"
             self._send_welcome_email(data, step)
-
-        self.after(0, lambda: self._done(
-            True, f"User '{data['email']}' created in O365 & AD!", log))
 
     def _done(self, success: bool, message: str, log: list):
         self._progress.stop()

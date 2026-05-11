@@ -4,11 +4,12 @@ Service for sending welcome emails using SMTP.
 """
 
 import smtplib
-from email.message import EmailMessage
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Tuple, Dict, Any
 
+from core.settings_manager import sm
 from config import (
-    WELCOME_EMAIL_SUBJECT, WELCOME_EMAIL_TEMPLATE,
     DEFAULT_EMAIL_SENDER, DEFAULT_EMAIL_CC
 )
 
@@ -23,34 +24,44 @@ class MailService:
                            cc_email: str, 
                            user_data: Dict[str, Any]) -> Tuple[bool, str]:
         """
-        Populates the template and sends a welcome email.
+        Populates the template and sends a welcome email as HTML
+        to prevent email clients (e.g. Gmail) from splitting the message.
         """
         try:
-            # Prepare the body
-            body = WELCOME_EMAIL_TEMPLATE.format(
+            # Populate the template from SettingsManager
+            template = sm.get("welcome_email_template")
+            plain_body = template.format(
                 first_name=user_data.get("first_name", ""),
                 email=user_data.get("email", ""),
                 password=user_data.get("password", ""),
                 sam_account_name=user_data.get("sam_account_name", "")
             )
 
-            msg = EmailMessage()
-            msg.set_content(body)
-            msg['Subject'] = WELCOME_EMAIL_SUBJECT
-            msg['From'] = sender_email
-            msg['To'] = to_email
-            if cc_email:
-                msg['Cc'] = cc_email
+            # Convert plain text to a minimal HTML version so that
+            # the email is sent as a single MIME part and never split.
+            html_body = "<html><body><pre style=\"font-family:Arial,sans-serif;font-size:14px;white-space:pre-wrap;\">" \
+                        + plain_body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") \
+                        + "</pre></body></html>"
 
-            # Connect to Office 365 SMTP server
-            # Note: O365 SMTP requires 'modern authentication' (OAuth2) in many tenants, 
-            # but legacy SMTP AUTH might still work if enabled.
-            server = smtplib.SMTP('smtp.office365.com', 587)
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = sm.get("welcome_email_subject")
+            msg["From"]    = sender_email
+            msg["To"]      = to_email
+            if cc_email:
+                msg["Cc"] = cc_email
+
+            # Attach plain text first, then HTML (email clients prefer the last part)
+            msg.attach(MIMEText(plain_body, "plain", "utf-8"))
+            msg.attach(MIMEText(html_body,  "html",  "utf-8"))
+
+            recipients = [to_email] + ([cc_email] if cc_email else [])
+
+            server = smtplib.SMTP("smtp.office365.com", 587)
             server.starttls()
             server.login(sender_email, sender_password)
-            server.send_message(msg)
+            server.sendmail(sender_email, recipients, msg.as_string())
             server.quit()
-            
+
             return True, "Welcome email sent successfully"
         except smtplib.SMTPAuthenticationError:
             return False, "Email authentication failed. Check your password."

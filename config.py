@@ -59,6 +59,18 @@ LICENSE_SKU_MAP = {
     "Microsoft 365 Business Standard": "f245ecc8-75af-4f8e-b61f-27d8114de5f3",   # O365_BUSINESS_PREMIUM
 }
 
+DEPARTMENTS = [
+    "Engineering Services",
+    "IIOT",
+    "Growth",
+    "Human Resources",
+    "MES Practice",
+    "Finance",
+    "IT",
+    "SCM"
+]
+
+
 EMPLOYEE_TYPES = [
     "Full Time",
     "Part Time",

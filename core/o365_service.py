@@ -785,54 +785,55 @@ class O365Service:
         if not upn:
             return [(name, False, "Could not resolve UPN") for _, name in group_items]
 
-        # 1. Try Graph API for all first (fastest)
-        remaining = []
+        # 1. Try Graph API for all (Security, Unified, and DLs)
         for gid, gname in group_items:
             ok, msg = self.add_to_group(user_id, gid, admin_upn=admin_upn, skip_ps=True)
-            if ok:
-                results.append((gname, True, msg))
-            else:
-                remaining.append((gid, gname))
-        
-        if not remaining:
-            return results
-
-        # Method 2: PowerShell fallback removed to prevent SentinelOne blocks.
-        # Distribution Lists that cannot be added via Graph API must be managed in AD.
-        for _, gname in remaining:
-            results.append((gname, False, "Graph API failed (DL/Mail-Sec); manual action required"))
+            results.append((gname, ok, msg))
         
         return results
 
     def add_to_group(self, user_id: str, group_id: str, admin_upn: str = "", skip_ps: bool = False) -> Tuple[bool, str]:
-        """Add user to a group (Security or DL)."""
-        body = {"@odata.id": f"{GRAPH_BASE}/directoryObjects/{user_id}"}
+        """Add user to a group (Security, O365 Group, or Distribution List)."""
+        # Format 1: OData Reference (Standard for Security/Unified groups)
+        body_ref = {"@odata.id": f"{GRAPH_BASE}/directoryObjects/{user_id}"}
+        # Format 2: Plain ID (Required for some legacy Distribution Lists)
+        body_plain = {"id": user_id}
+        
         last_err = "Unknown error"
         
-        # 1. Try Graph API v1.0
-        for _ in range(2):
-            try:
-                r = self._post(f"{GRAPH_BASE}/groups/{group_id}/members/$ref", body)
-                if r.status_code in (204, 201): return True, "Added (Graph v1.0)"
-                msg = r.json().get("error", {}).get("message", r.text[:200])
-                if "already exists" in msg.lower(): return True, "Already a member"
-                if "Cannot Update a mail-enabled" in msg:
-                    last_err = f"GRAPH_DL_ERROR: {msg}"; break
-                last_err = msg
-            except Exception as e: last_err = str(e)
-
-        if skip_ps: return False, last_err
-
-        # 2. Try Graph BETA
+        # 1. Try Graph v1.0 - $ref with OData reference
         try:
-            r_beta = self._post(f"{GRAPH_BETA}/groups/{group_id}/members/$ref", body)
-            if r_beta.status_code in (200, 204): return True, "Added (Graph Beta)"
+            r = self._post(f"{GRAPH_BASE}/groups/{group_id}/members/$ref", body_ref)
+            if r.status_code in (204, 201): return True, "Added ($ref)"
+            err_msg = r.json().get("error", {}).get("message", r.text[:200])
+            if "already exists" in err_msg.lower(): return True, "Already a member"
+            last_err = err_msg
+        except Exception as e: last_err = str(e)
+
+        # 2. Try Graph v1.0 - Direct members with plain ID (Crucial for DLs)
+        try:
+            r = self._post(f"{GRAPH_BASE}/groups/{group_id}/members", body_plain)
+            if r.status_code in (204, 201): return True, "Added (Direct-ID)"
+            err_msg = r.json().get("error", {}).get("message", r.text[:200])
+            if "already exists" in err_msg.lower(): return True, "Already a member"
+            if "synchronized from your on-premises" in err_msg.lower():
+                return False, f"SYNC_ERROR: Group is synced from AD. Add user in AD instead."
+            last_err = err_msg
+        except Exception as e: last_err = str(e)
+
+        # 3. Try Graph v1.0 - Direct members with OData reference
+        try:
+            r = self._post(f"{GRAPH_BASE}/groups/{group_id}/members", body_ref)
+            if r.status_code in (204, 201): return True, "Added (Direct-OData)"
         except Exception: pass
 
-        # 3. Fallback to PS (Singular)
-        res = self.add_to_groups_multi(user_id, [(group_id, "Group")], admin_upn)
-        if not res: return False, "PS fallback yielded no results"
-        return res[0][1], res[0][2]
+        # 4. Try Graph Beta
+        try:
+            r = self._post(f"{GRAPH_BETA}/groups/{group_id}/members/$ref", body_ref)
+            if r.status_code in (200, 204): return True, "Added (Beta)"
+        except Exception: pass
+
+        return False, last_err
 
     def _find_sp_exact(self, display_name: str) -> Optional[Dict]:
         try:

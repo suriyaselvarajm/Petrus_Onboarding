@@ -1,5 +1,6 @@
 import ldap3
-from ldap3 import Server, Connection, ALL, NTLM, SUBTREE, MODIFY_REPLACE
+from ldap3 import Server, Connection, ALL, NTLM, SUBTREE, MODIFY_REPLACE, Tls
+import ssl
 import subprocess
 import json
 from typing import Optional, List, Dict, Any, Tuple
@@ -10,6 +11,7 @@ from config import (
     AD_ADMIN_USER, AD_ADMIN_PASSWORD,
 )
 
+from core.settings_manager import sm
 import os
 
 
@@ -21,13 +23,14 @@ class ADService:
 
     def __init__(self):
         self._connected = False
-        self._server_address = AD_SERVER or AD_DOMAIN
+        self._server_address = sm.get("ad_server") or sm.get("ad_domain") or AD_DOMAIN
         self._session_user = None
         self._session_password = None
 
     def _get_connection(self) -> Connection:
-        """Create and bind an LDAP connection using config or session credentials."""
-        server = Server(self._server_address, get_info=ALL)
+        """Create and bind an LDAP connection using config or session credentials over LDAPS."""
+        tls_config = Tls(validate=ssl.CERT_NONE, version=ssl.PROTOCOL_TLSv1_2)
+        server = Server(self._server_address, port=636, use_ssl=True, tls=tls_config, get_info=ALL)
         
         user = self._session_user or AD_ADMIN_USER
         password = self._session_password or AD_ADMIN_PASSWORD
@@ -36,7 +39,8 @@ class ADService:
             raise ValueError("Authentication required. Please sign in.")
 
         if user and "\\" not in user and "@" not in user:
-            user = f"{user}@{AD_DOMAIN}"
+            domain = sm.get("ad_domain") or AD_DOMAIN
+            user = f"{user}@{domain}"
 
         # Use SIMPLE authentication
         conn = Connection(
@@ -56,19 +60,21 @@ class ADService:
         try:
             with self._get_connection() as conn:
                 self._connected = True
-                return True, f"Connected to {self._server_address}"
+                return True, "Connected"
         except Exception as e:
             return False, str(e)
 
     def authenticate_and_check_permission(self, username: str, password: str) -> Tuple[bool, str]:
-        """Verify credentials and check 'Domain Admins' membership via LDAP."""
+        """Verify credentials and check 'Domain Admins' membership via LDAPS."""
         try:
-            server = Server(self._server_address, get_info=ALL)
+            tls_config = Tls(validate=ssl.CERT_NONE, version=ssl.PROTOCOL_TLSv1_2)
+            server = Server(self._server_address, port=636, use_ssl=True, tls=tls_config, get_info=ALL)
             
             # Format user for SIMPLE bind (UPN format: user@domain)
             auth_user = username
             if "\\" not in username and "@" not in username:
-                auth_user = f"{username}@{AD_DOMAIN}"
+                domain = sm.get("ad_domain") or AD_DOMAIN
+                auth_user = f"{username}@{domain}"
             
             # Use SIMPLE authentication
             with Connection(server, user=auth_user, password=password, authentication=ldap3.SIMPLE) as conn:
@@ -233,7 +239,7 @@ class ADService:
             'company': COMPANY_NAME,
             'employeeID': data.get("employee_id", ""),
             'employeeNumber': data.get("employee_id", ""),
-            'userAccountControl': '512'
+            'userAccountControl': '514' # Create disabled first to avoid 'unwillingToPerform' on Port 389
         }
         
         if manager_dn:
@@ -254,17 +260,19 @@ class ADService:
                 if not conn.add(user_dn, attributes=attrs):
                     return False, f"Failed to create user object: {conn.result['description']}"
                 
-                # 2. Set password (requires LDAPS or special bind)
-                # Note: In some environments, this may fail if not using SSL/TLS
+                # 2. Set password (requires LDAPS for password)
                 encoded_pwd = f'"{password}"'.encode('utf-16-le')
-                conn.modify(user_dn, {'unicodePwd': [(MODIFY_REPLACE, [encoded_pwd])]})
+                pwd_ok = conn.modify(user_dn, {'unicodePwd': [(MODIFY_REPLACE, [encoded_pwd])]})
                 
-                # 3. Enable account and set 'Change Password At Logon' via pwdLastSet=0
-                conn.modify(user_dn, {
+                # 3. Enable account and set 'Change Password At Logon'
+                enable_ok = conn.modify(user_dn, {
                     'userAccountControl': [(MODIFY_REPLACE, [512])],
                     'pwdLastSet': [(MODIFY_REPLACE, [0])]
                 })
                 
+                if not pwd_ok or not enable_ok:
+                    return True, f"{sam} (Warning: Account created but remains DISABLED. Password policy or non-SSL connection prevented enablement. Please enable manually.)"
+
                 return True, sam
         except Exception as e:
             return False, str(e)
@@ -310,4 +318,76 @@ class ADService:
         except Exception as e:
             return False, str(e)
 
+    def search_user(self, query: str) -> List[Dict]:
+        """Search for users by display name, sAMAccountName, or mail."""
+        try:
+            with self._get_connection() as conn:
+                conn.search(
+                    search_base=AD_BASE_DN,
+                    search_filter=(
+                        f'(&(objectClass=user)(objectCategory=person)'
+                        f'(|(displayName=*{query}*)(sAMAccountName=*{query}*)(mail=*{query}*)))'
+                    ),
+                    search_scope=SUBTREE,
+                    attributes=['displayName', 'sAMAccountName', 'mail', 'title',
+                                'department', 'telephoneNumber', 'mobile',
+                                'manager', 'distinguishedName', 'userPrincipalName', 'employeeID']
+                )
+                results = []
+                for e in conn.entries:
+                    def _v(attr, _e=e):
+                        try: return getattr(_e, attr).value or ""
+                        except Exception: return ""
+                    manager_dn   = _v("manager")
+                    manager_name = ""
+                    if manager_dn:
+                        try:
+                            conn.search(AD_BASE_DN, f'(distinguishedName={manager_dn})',
+                                        attributes=['displayName'])
+                            if conn.entries:
+                                manager_name = conn.entries[0].displayName.value or ""
+                        except Exception: pass
+                    results.append({
+                        "displayName":       _v("displayName"),
+                        "sAMAccountName":    _v("sAMAccountName"),
+                        "mail":              _v("mail"),
+                        "title":             _v("title"),
+                        "department":        _v("department"),
+                        "mobile":            _v("mobile") or _v("telephoneNumber"),
+                        "manager_dn":        manager_dn,
+                        "manager_name":      manager_name,
+                        "distinguishedName": _v("distinguishedName"),
+                        "userPrincipalName": _v("userPrincipalName"),
+                        "employeeID":        _v("employeeID"),
+                    })
+                return results
+        except Exception as e:
+            print(f"[AD] search_user error: {e}")
+            return []
 
+    def update_user_profile(self, sam: str, changes: Dict[str, Any]) -> Tuple[bool, str]:
+        """Update profile fields (title, department, mobile, manager) in AD."""
+        try:
+            dn = self.get_user_dn(sam)
+            if not dn:
+                return False, "User not found in Active Directory"
+            field_map = {
+                "title":      "title",
+                "department": "department",
+                "mobile":     "mobile",       # Telephones tab in AD (NOT General tab)
+                "manager_dn": "manager",
+            }
+            mods = {}
+            for key, attr in field_map.items():
+                if key in changes:
+                    val = changes[key]
+                    mods[attr] = [(MODIFY_REPLACE, [val])] if val else [(MODIFY_REPLACE, [])]
+            if not mods:
+                return True, "No changes to apply"
+            with self._get_connection() as conn:
+                conn.modify(dn, mods)
+                if conn.result["result"] == 0:
+                    return True, "AD profile updated successfully"
+                return False, conn.result.get("description", "Unknown LDAP error")
+        except Exception as e:
+            return False, str(e)

@@ -18,6 +18,43 @@ from core.mail_service import MailService
 from core.credential_manager import save_password, get_password
 from gui.styles import C, F
 
+class _ScrollableFrame(tk.Frame):
+    """Canvas-backed scrollable container."""
+    def __init__(self, parent: tk.Widget, **kw):
+        super().__init__(parent, bg=C["bg"], **kw)
+        canvas = tk.Canvas(self, bg=C["bg"], highlightthickness=0)
+        vsb    = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        self.inner = tk.Frame(canvas, bg=C["bg"])
+        self.inner.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        
+        self._canvas = canvas
+        def _on_mousewheel(event):
+            try:
+                if not canvas.winfo_exists(): return
+                w = event.widget.winfo_containing(event.x_root, event.y_root)
+            except Exception:
+                w = event.widget
+            
+            widget_class = getattr(w, "winfo_class", lambda: "")() if w else ""
+            if widget_class in ("TCombobox", "Listbox", "TSpinbox", "Spinbox", "Text"):
+                return
+                
+            try:
+                if canvas.winfo_exists():
+                    canvas.yview_scroll(-1 * (event.delta // 120), "units")
+            except (tk.TclError, NameError):
+                pass
+                
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self.bind("<Destroy>", lambda _: self.unbind_all("<MouseWheel>"))
+
 class OffboardingForm(tk.Frame):
     def __init__(self, parent, o365_service, ad_service, on_back=None):
         super().__init__(parent, bg=C["bg"])
@@ -43,8 +80,9 @@ class OffboardingForm(tk.Frame):
                  bg=C["bg"], fg=C["text"], font=F["title"]).pack(side="left", padx=20)
 
         # Main container
-        self._container = tk.Frame(self, bg=C["bg"])
-        self._container.pack(fill="both", expand=True, padx=40, pady=20)
+        self._scroll = _ScrollableFrame(self)
+        self._scroll.pack(fill="both", expand=True, padx=40, pady=20)
+        self._container = self._scroll.inner
 
         # Left: Search & User Info
         self._left = tk.Frame(self._container, bg=C["bg"])
