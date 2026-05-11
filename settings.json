@@ -1,0 +1,16 @@
+{
+    "welcome_email_subject": "Welcome to Petrus Technologies - Account Details",
+    "welcome_email_template": "Hi {first_name},\n\nWelcome to Petrus Technologies! We're excited to have you join our team and look forward to supporting you as you begin your journey with us.\nTo help you get started, please find your account details below:\n\nPetrus Email Account (Microsoft 365):\n• Username: {email}\n• Temporary Password: {password}\n\nYou can log in at: https://www.office.com\n\nPetrus System Login:\n• Username: {sam_account_name}\n• Password: Same as above\n\nFor security reasons, you will be prompted to change your password upon your first login.\nIf you encounter any issues or need assistance during setup, please don't hesitate to reach out to the IT team. We're here to help ensure a smooth onboarding experience.\n\nOnce again, welcome aboard—we're glad to have you with us!\n\nWarm Regards\nIT Team\n638 4164 343\n",
+    "offboarding_email_subject": "Action Required: Data Confirmation for Off-boarding - {name}",
+    "offboarding_email_template": "Hi {manager_name},\n\nAs you are aware, one of your team members Mr. {name} has exited the organization.\n\nKindly confirm whether any mailbox data, emails, or files from the account need to be backed up.\n\nIf we do not receive any confirmation from your end within 5 days, the account and associated data will be permanently deleted and cannot be recovered thereafter.\n\nPlease let us know if any further assistance is required.\n\nBest regards,\nIT Team\n6384164343\n",
+    "default_email_sender": "itsupport@petrustechnologies.com",
+    "default_email_cc": "it@petrustechnologies.com",
+    "default_city": "Coimbatore",
+    "default_state": "Tamil Nadu",
+    "default_zip": "641006",
+    "default_country": "India",
+    "default_office": "Coimbatore",
+    "default_street": "511, Sathy Rd, Sivasakthi Colony, Ganapathy",
+    "ad_domain": "petrus.local",
+    "ad_server": "10.20.30.101"
+}

@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from config import (
     GRAPH_BASE, GRAPH_BETA, GRAPH_RESOURCE,
 <<<<<<< HEAD
+<<<<<<< HEAD
     ZOHO_APP_NAME, EMAIL_DOMAIN, COMPANY_NAME,
 =======
 <<<<<<< Updated upstream
@@ -24,23 +25,22 @@ from config import (
     EMAIL_DOMAIN, COMPANY_NAME,
 >>>>>>> Stashed changes
 >>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
+=======
+    ZOHO_APP_NAME, EMAIL_DOMAIN, COMPANY_NAME,
+    LICENSE_SKU_MAP, ZOHO_APP_OBJECT_ID,
+    SHAREPOINT_FILE_URL, SHAREPOINT_DRIVE_ID, SHAREPOINT_ITEM_ID
+>>>>>>> dev
 )
+from core.credential_manager import cred_manager, SCOPES_GRAPH, SCOPES_EXO
+
+SELECT_PARAM = "$select"
+SP_SELECT_FIELDS = "id,displayName,appRoles"
+ERROR_PREFIX = "ERROR:"
+ODATA_NEXT_LINK = "@odata.nextLink"
 
 
-# ── Token acquisition ──────────────────────────────────────────────────────────
 
-def _fetch_az_token() -> Optional[str]:
-    """Get a Graph API access token from Azure CLI."""
-    try:
-        r = subprocess.run(
-            f'az account get-access-token --resource "{GRAPH_RESOURCE}" --output json',
-            capture_output=True, text=True, timeout=30, shell=True,
-        )
-        if r.returncode == 0:
-            return json.loads(r.stdout).get("accessToken")
-    except Exception:
-        pass
-    return None
+# ── O365 Service ───────────────────────────────────────────────────────────────
 
 
 # ── O365 Service ───────────────────────────────────────────────────────────────
@@ -50,15 +50,26 @@ class O365Service:
     def __init__(self):
         self._token: Optional[str] = None
         self._token_expiry: float = 0.0
+        self._last_auth_fail: float = 0.0
+        self._drive_id: Optional[str] = None
+        self._item_id:  Optional[str] = None
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
     def _token_valid(self) -> bool:
+        # If last attempt failed recently, don't try again to avoid spamming prompts
+        if self._last_auth_fail and time.time() - self._last_auth_fail < 30:
+            return True # Pretend it's valid to skip the call
         return bool(self._token) and time.time() < self._token_expiry - 60
 
     def _refresh_token(self) -> None:
-        self._token = _fetch_az_token()
-        self._token_expiry = time.time() + 3600
+        self._token = cred_manager.get_token(SCOPES_GRAPH)
+        if self._token:
+            self._token_expiry = time.time() + 3500
+            self._last_auth_fail = 0
+        else:
+            self._last_auth_fail = time.time()
+            self._token_expiry = 0
 
     def _headers(self) -> Dict[str, str]:
         if not self._token_valid():
@@ -74,11 +85,27 @@ class O365Service:
             h.update(extra_headers)
         return requests.get(url, headers=h, params=params, timeout=15)
 
-    def _post(self, url: str, body: Dict) -> requests.Response:
-        return requests.post(url, headers=self._headers(), json=body, timeout=20)
+    def _post(self, url: str, body: Dict, params: Dict = None) -> requests.Response:
+        r = requests.post(url, headers=self._headers(), json=body, params=params, timeout=20)
+        self._check_sync_error(r)
+        return r
 
-    def _patch(self, url: str, body: Dict) -> requests.Response:
-        return requests.patch(url, headers=self._headers(), json=body, timeout=20)
+    def _patch(self, url: str, body: Dict, params: Dict = None) -> requests.Response:
+        r = requests.patch(url, headers=self._headers(), json=body, params=params, timeout=20)
+        self._check_sync_error(r)
+        return r
+
+    def _check_sync_error(self, r: requests.Response):
+        """Inject a hint if the error is due to AD sync read-only restrictions."""
+        if r.status_code in (400, 403):
+            try:
+                err = r.json().get("error", {}).get("message", "")
+                # Common sync error strings
+                if "read-only" in err.lower() or "on-premises" in err.lower() or "mail-enabled" in err.lower():
+                    # We prefix this so the GUI can detect it and try AD fallback
+                    r.reason = f"SYNC_ERROR: {err}"
+            except Exception:
+                pass
 
     def _put(self, url: str, body: Dict) -> requests.Response:
         return requests.put(url, headers=self._headers(), json=body, timeout=20)
@@ -99,13 +126,34 @@ class O365Service:
     def get_tenant_info(self) -> Dict:
         try:
             r = self._get(f"{GRAPH_BASE}/organization",
-                          params={"$select": "displayName,id"})
+                          params={SELECT_PARAM: "displayName,id"})
             if r.status_code == 200:
                 orgs = r.json().get("value", [])
                 return orgs[0] if orgs else {}
         except Exception:
             pass
         return {}
+
+    def check_admin_roles(self) -> Tuple[bool, str]:
+        """
+        Check if the signed-in Azure CLI user has Global Admin or User Admin roles.
+        """
+        try:
+            r = self._get(f"{GRAPH_BASE}/me/memberOf")
+            if r.status_code == 200:
+                data = r.json().get("value", [])
+                for role in data:
+                    if role.get("@odata.type") == "#microsoft.graph.directoryRole":
+                        tid = role.get("roleTemplateId")
+                        if tid in ("62e90394-69f5-4237-9190-012177145e10", "fe930be7-5e62-47db-91af-98c3a49a38b1"):
+                            return True, f"Authorized as {role.get('displayName')}"
+                return False, "User does not have User Administrator or Global Administrator roles in O365."
+            elif r.status_code == 401:
+                return False, "Azure CLI session expired or not authorized."
+            else:
+                return False, f"Failed to check O365 roles (HTTP {r.status_code})"
+        except Exception as e:
+            return False, f"Error checking O365 roles: {str(e)}"
 
     # ── User Checks ───────────────────────────────────────────────────────────
 
@@ -122,7 +170,7 @@ class O365Service:
         users = []
         try:
             params: Dict[str, Any] = {
-                "$select": "id,displayName,userPrincipalName,jobTitle",
+                SELECT_PARAM: "id,displayName,userPrincipalName,jobTitle",
                 "$top": 999,
             }
             extra = {}
@@ -136,7 +184,7 @@ class O365Service:
                 if r.status_code == 200:
                     data = r.json()
                     users.extend(data.get("value", []))
-                    url = data.get("@odata.nextLink")
+                    url = data.get(ODATA_NEXT_LINK)
                     params = None  # query params are embedded in nextLink
                 else:
                     break
@@ -164,6 +212,7 @@ class O365Service:
                 if r.status_code == 200:
                     data = r.json()
                     for g in data.get("value", []):
+<<<<<<< HEAD
 <<<<<<< HEAD
                         # Skip groups synced from local AD (they cannot be modified in O365)
                         if g.get("onPremisesSyncEnabled"):
@@ -199,8 +248,11 @@ class O365Service:
                         # Allow Mail-Enabled Security Groups / Distribution Lists to be listed
 >>>>>>> Stashed changes
 >>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
+=======
+                        self._tag_group_type(g)
+>>>>>>> dev
                         groups.append(g)
-                    url = data.get("@odata.nextLink")
+                    url = data.get(ODATA_NEXT_LINK)
                 else:
                     break
         except Exception:
@@ -208,7 +260,29 @@ class O365Service:
         return groups
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
+=======
+    def _tag_group_type(self, g: Dict):
+        """Helper to tag group with its type for display."""
+        is_unified  = "Unified" in g.get("groupTypes", [])
+        is_mail     = g.get("mailEnabled", False)
+        is_security = g.get("securityEnabled", False)
+        is_synced   = g.get("onPremisesSyncEnabled", False)
+
+        if is_unified:
+            g["_type"] = "M365 Group"
+        elif is_mail and not is_security:
+            g["_type"] = "Distribution List"
+        elif is_mail and is_security:
+            g["_type"] = "Mail-Sec Group"
+        else:
+            g["_type"] = "Security Group"
+
+        if is_synced:
+            g["_type"] += " (AD Synced)"
+
+>>>>>>> dev
     def get_distribution_lists(self) -> List[Dict]:
         """Fetch only Distribution Lists (mail-enabled, not security-enabled, not Unified)."""
         dls: List[Dict] = []
@@ -227,7 +301,7 @@ class O365Service:
                         if "Unified" not in g.get("groupTypes", []):
                             g["_type"] = "Distribution List"
                             dls.append(g)
-                    url = data.get("@odata.nextLink")
+                    url = data.get(ODATA_NEXT_LINK)
                 else:
                     break
         except Exception:
@@ -243,6 +317,167 @@ class O365Service:
         except Exception:
             pass
         return []
+
+    # ── Off-boarding & Search ─────────────────────────────────────────────────
+
+    def check_duplicates(self, email: str, employee_id: str = "") -> Tuple[bool, str]:
+        """Check if UPN or Employee ID already exists in O365."""
+        try:
+            # Check UPN
+            r = self._get(f"{GRAPH_BASE}/users/{email}?$select=id,displayName")
+            if r.status_code == 200:
+                user = r.json()
+                return True, f"UPN already exists: {user.get('displayName')} ({email})"
+            
+            # Check Employee ID
+            if employee_id:
+                params = {"$filter": f"employeeId eq '{employee_id}'", "$select": "id,displayName,userPrincipalName"}
+                r_id = self._get(f"{GRAPH_BASE}/users", params=params)
+                if r_id.status_code == 200:
+                    val = r_id.json().get("value", [])
+                    if val:
+                        u = val[0]
+                        return True, f"Employee ID '{employee_id}' already assigned to {u.get('displayName')} ({u.get('userPrincipalName')})"
+        except Exception as e:
+            return False, f"Duplicate check error: {str(e)}"
+        return False, ""
+
+    def search_users_broad(self, query: str) -> List[Dict]:
+        """Search users by name, email, or job title."""
+        users = []
+        try:
+            params = {
+                "$search": f'"displayName:{query}" OR "userPrincipalName:{query}"',
+                "$select": "id,displayName,userPrincipalName,jobTitle,department,employeeId,accountEnabled",
+                "$top": 50
+            }
+            r = self._get(f"{GRAPH_BASE}/users", params=params, extra_headers={"ConsistencyLevel": "eventual"})
+            if r.status_code == 200:
+                users = r.json().get("value", [])
+        except Exception:
+            pass
+        return users
+
+    def get_user_details(self, user_id: str) -> Dict:
+        """Fetch detailed info for off-boarding (licenses, manager)."""
+        try:
+            r = self._get(f"{GRAPH_BASE}/users/{user_id}",
+                          params={"$select": "id,displayName,userPrincipalName,jobTitle,department,employeeId,accountEnabled,mobilePhone"})
+            if r.status_code == 200:
+                user = r.json()
+                # Get licenses
+                r_lic = self._get(f"{GRAPH_BASE}/users/{user_id}/licenseDetails")
+                user["_licenses"] = r_lic.json().get("value", []) if r_lic.status_code == 200 else []
+                # Get manager
+                r_mgr = self._get(f"{GRAPH_BASE}/users/{user_id}/manager")
+                user["_manager"] = r_mgr.json() if r_mgr.status_code == 200 else None
+                return user
+        except Exception:
+            pass
+        return {}
+
+    def remove_license(self, user_id: str, sku_id: str) -> Tuple[bool, str]:
+        """Remove a specific license from a user."""
+        try:
+            body = {"addLicenses": [], "removeLicenses": [sku_id]}
+            r = self._post(f"{GRAPH_BASE}/users/{user_id}/assignLicense", body)
+            if r.status_code == 200:
+                return True, "License removed"
+            err = r.json().get("error", {}).get("message", r.text[:200])
+            return False, err
+        except Exception as e:
+            return False, str(e)
+
+    def block_sign_in(self, user_id: str, block: bool = True) -> Tuple[bool, str]:
+        """Block or unblock a user's sign-in."""
+        try:
+            r = self._patch(f"{GRAPH_BASE}/users/{user_id}", {"accountEnabled": not block})
+            if r.status_code in (200, 204):
+                return True, f"Sign-in {'blocked' if block else 'enabled'}"
+            err = r.json().get("error", {}).get("message", r.text[:200])
+            return False, err
+        except Exception as e:
+            return False, str(e)
+
+    def delete_user(self, user_id: str) -> Tuple[bool, str]:
+        """Delete a user account."""
+        try:
+            r = requests.delete(f"{GRAPH_BASE}/users/{user_id}", headers=self._headers(), timeout=20)
+            if r.status_code in (200, 204):
+                return True, "User deleted"
+            err = r.json().get("error", {}).get("message", r.text[:200])
+            return False, err
+        except Exception as e:
+            return False, str(e)
+
+    # ── SharePoint Excel Logging ──────────────────────────────────────────────
+
+    def _resolve_sharepoint_file(self) -> Tuple[bool, str]:
+        """Resolve the SHAREPOINT_FILE_URL to a Drive ID and Item ID."""
+        if self._drive_id and self._item_id:
+            return True, "Already resolved"
+        
+        # Fallback to hardcoded IDs if provided in config
+        if SHAREPOINT_DRIVE_ID and SHAREPOINT_ITEM_ID:
+            self._drive_id = SHAREPOINT_DRIVE_ID
+            self._item_id  = SHAREPOINT_ITEM_ID
+            return True, "Using configured IDs"
+
+        try:
+            import base64
+            sharing_url = SHAREPOINT_FILE_URL
+            # Encode URL to base64, remove padding, and make URL-safe
+            encoded = base64.b64encode(sharing_url.encode('utf-8')).decode('utf-8')
+            encoded = "u!" + encoded.replace('/', '_').replace('+', '-').rstrip('=')
+            
+            r = self._get(f"{GRAPH_BASE}/shares/{encoded}/driveItem")
+            if r.status_code == 200:
+                data = r.json()
+                self._drive_id = data.get("parentReference", {}).get("driveId")
+                self._item_id  = data.get("id")
+                return True, "Success"
+            
+            err = ""
+            try:
+                err = r.json().get("error", {}).get("message", r.text[:200])
+            except Exception:
+                err = r.text[:200]
+            return False, f"Graph API Error ({r.status_code}): {err}"
+        except Exception as e:
+            return False, str(e)
+
+    def log_to_excel(self, sheet_name: str, row_values: List[Any]) -> Tuple[bool, str]:
+        """Append a row of data to a specific sheet in the SharePoint Excel file."""
+        ok_res, msg_res = self._resolve_sharepoint_file()
+        if not ok_res:
+            return False, f"Could not resolve SharePoint file: {msg_res}"
+
+        try:
+            # We use the 'workbook/worksheets/{name}/tables/Table1/rows' or fallback to range
+            # Let's try to find if there's a table first, or just append to the used range.
+            # Easiest: POST .../range(address='A1')/insert with shift='Down'
+            # But Graph Excel API is better with usedRange.
+            
+            url = f"{GRAPH_BASE}/drives/{self._drive_id}/items/{self._item_id}/workbook/worksheets/{sheet_name}/tables"
+            r_tables = self._get(url)
+            table_name = "Table1" # Default assumption
+            if r_tables.status_code == 200:
+                tables = r_tables.json().get("value", [])
+                if tables:
+                    table_name = tables[0].get("name", "Table1")
+            
+            # Add row to table
+            url = f"{GRAPH_BASE}/drives/{self._drive_id}/items/{self._item_id}/workbook/worksheets/{sheet_name}/tables/{table_name}/rows"
+            body = {"values": [row_values]}
+            r = self._post(url, body)
+            if r.status_code in (200, 201):
+                return True, "Log entry added"
+            
+            # Fallback: Range insert (this is more complex, so we'll stop here if table fails)
+            err = r.json().get("error", {}).get("message", r.text[:200])
+            return False, f"Excel error: {err}"
+        except Exception as e:
+            return False, str(e)
 
     # ── User Creation ─────────────────────────────────────────────────────────
 
@@ -273,6 +508,7 @@ class O365Service:
             "userPrincipalName": email,
             "mailNickname":     data.get("mail_nickname", sam[:48]),
 <<<<<<< HEAD
+<<<<<<< HEAD
             "proxyAddresses":   proxy_addrs,
 =======
 <<<<<<< Updated upstream
@@ -281,6 +517,10 @@ class O365Service:
 =======
 >>>>>>> Stashed changes
 >>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
+=======
+            # NOTE: proxyAddresses is read-only via Graph API on user creation.
+            # Proxy addresses (SMTP primary + smtp:empID alias) are set in AD only.
+>>>>>>> dev
             "passwordProfile": {
                 "forceChangePasswordNextSignIn": data.get("force_change_pwd", True),
                 "password": data.get("password", "Welcome@123"),
@@ -320,6 +560,7 @@ class O365Service:
     # ── Post-Creation Steps ───────────────────────────────────────────────────
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     def assign_license(self, user_id: str, sku_id: str) -> Tuple[bool, str]:
         body = {"addLicenses": [{"skuId": sku_id}], "removeLicenses": []}
         try:
@@ -336,6 +577,8 @@ class O365Service:
         # Method 1: authentication/requirements (newer)
 =======
 <<<<<<< Updated upstream
+=======
+>>>>>>> dev
     def wait_for_user_provisioned(self, user_id: str,
                                   max_wait: int = 60) -> Tuple[bool, str]:
         """
@@ -344,7 +587,7 @@ class O365Service:
         Returns (True, "") when ready, or (False, reason) on timeout.
         """
         url = f"{GRAPH_BASE}/users/{user_id}?$select=id,userPrincipalName"
-        for attempt in range(max_wait // 5):
+        for _ in range(max_wait // 5):
             try:
                 r = self._get(url)
                 if r.status_code == 200:
@@ -363,7 +606,7 @@ class O365Service:
         Returns (True, "") when ready, or (False, reason) on timeout.
         """
         url = f"{GRAPH_BASE}/users/{user_id}/mailboxSettings"
-        for attempt in range(max_wait // 10):
+        for _ in range(max_wait // 10):
             try:
                 r = self._get(url)
                 # 200 = mailbox ready; 404/400 = not yet provisioned
@@ -401,6 +644,32 @@ class O365Service:
             pass
         return None
 
+    def _do_assign(self, identifier: str, body: dict, attempt: int, is_upn: bool) -> Tuple[bool, str, bool]:
+        """Attempt to assign a license, returning (success, message, should_stop)."""
+        try:
+            r = self._post(f"{GRAPH_BASE}/users/{identifier}/assignLicense", body)
+            if r.status_code == 200:
+                if is_upn:
+                    tag = f" via UPN (attempt {attempt+1})"
+                elif attempt:
+                    tag = f" (attempt {attempt+1})"
+                else:
+                    tag = ""
+                return True, f"License assigned{tag}", True
+
+            err_body = {}
+            try:
+                err_body = r.json()
+            except Exception:
+                pass
+            last_err = err_body.get("error", {}).get("message", r.text[:200])
+
+            # Stop retrying on unrecoverable errors
+            stop = any(x in last_err.lower() for x in ("already", "authorization", "forbidden", "does not exist", "invalid"))
+            return False, last_err, stop
+        except Exception as e:
+            return False, str(e), False
+
     def assign_license(self, user_id: str, sku_id: str) -> Tuple[bool, str]:
         """
         Assign a license robustly:
@@ -408,7 +677,6 @@ class O365Service:
           2. Try using object-ID; if that keeps failing, fall back to UPN.
           3. Retry up to 4× with exponential back-off.
         """
-        # Step 1 — ensure usageLocation is confirmed on the object
         self._ensure_usage_location(user_id)
         time.sleep(3)   # brief pause for the PATCH to propagate
 
@@ -421,50 +689,40 @@ class O365Service:
             if delay:
                 time.sleep(delay)
 
-            # Choose identifier: prefer object-ID; fall back to UPN after attempt 2
             if i >= 2 and upn is None:
                 upn = self._get_upn(user_id)
             identifier = upn if (i >= 2 and upn) else user_id
 
-            try:
-                r = self._post(
-                    f"{GRAPH_BASE}/users/{identifier}/assignLicense", body
-                )
-                if r.status_code == 200:
-                    tag = f" via UPN (attempt {i+1})" if (identifier == upn) else (
-                          f" (attempt {i+1})" if i else "")
-                    return True, f"License assigned{tag}"
-
-                err_body = {}
-                try:
-                    err_body = r.json()
-                except Exception:
-                    pass
-                last_err = err_body.get("error", {}).get("message", r.text[:200])
-
-                # Stop retrying on unrecoverable errors
-                if any(x in last_err.lower() for x in
-                       ("already", "authorization", "forbidden",
-                        "does not exist", "invalid")):
-                    break
-            except Exception as e:
-                last_err = str(e)
+            ok, msg, stop = self._do_assign(identifier, body, i, identifier == upn)
+            if ok:
+                return True, msg
+            last_err = msg
+            if stop:
+                break
 
         return False, f"License assignment failed after {len(delays)+1} attempts: {last_err}"
 
     def enable_mfa(self, user_id: str) -> Tuple[bool, str]:
         """
-        Enable MFA for the user using up to 4 progressive methods:
-
-        1. PATCH /beta/users/{id}/authentication/requirements  (modern Graph)
-        2. PATCH /beta/users/{id} strongAuthenticationRequirements  (legacy Graph)
-        3. az rest — uses Azure CLI's native auth context (often more permissive)
-        4. MSOnline PowerShell — Set-MsolUser (works on most tenants)
-
-        Only returns "enforced via Security Defaults" if SD is explicitly confirmed ON.
+        Enable MFA for the user using progressive methods, retrying up to MFA_RETRY_COUNT times.
         """
+        from config import MFA_RETRY_COUNT
         upn = self._get_upn(user_id) or user_id
+        ps_err = ""
+        
+        for attempt in range(MFA_RETRY_COUNT):
+            # ── Method 1: modern per-user MFA state ──────────────────────────────
+            try:
+                r = self._patch(
+                    f"{GRAPH_BETA}/users/{user_id}/authentication/requirements",
+                    {"perUserMfaState": "enabled"},
+                )
+                if r.status_code in (200, 204):
+                    return True, f"Per-user MFA enabled (Graph API, attempt {attempt+1})"
+            except Exception:
+                pass
 
+<<<<<<< HEAD
         # ── Method 1: modern per-user MFA state ──────────────────────────────
 >>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
         try:
@@ -524,57 +782,31 @@ class O365Service:
             if r2.status_code in (200, 204):
                 return True, "Per-user MFA enabled (legacy Graph)"
         except Exception:
+=======
+            # ── Method 2: legacy strongAuthenticationRequirements ─────────────────
+            try:
+                r2 = self._patch(
+                    f"{GRAPH_BETA}/users/{user_id}",
+                    {"strongAuthenticationRequirements": [
+                        {"rememberMultiFactorAuthenticationOnTrustedDevices": False,
+                         "state": "enabled"}
+                    ]},
+                )
+                if r2.status_code in (200, 204):
+                    return True, f"Per-user MFA enabled (legacy Graph, attempt {attempt+1})"
+            except Exception:
+                pass
+
+            # Method 3: az rest fallback removed to bypass SentinelOne blocks
+>>>>>>> dev
             pass
 
-        # ── Method 3: az rest (uses az CLI auth directly) ─────────────────────
-        try:
-            import subprocess as _sp
-            body_json = '{"perUserMfaState":"enabled"}'
-            r3 = _sp.run(
-                ["az", "rest",
-                 "--method", "patch",
-                 "--url", f"{GRAPH_BETA}/users/{user_id}/authentication/requirements",
-                 "--body", body_json,
-                 "--headers", "Content-Type=application/json"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if r3.returncode == 0:
-                return True, "Per-user MFA enabled (az rest)"
-        except Exception:
-            pass
+            # If all Graph API methods fail, stop here to avoid interactive prompts.
+            ps_err = "All Graph API methods failed. PowerShell fallback was removed to prevent interactive prompts."
 
-        # ── Method 4: MSOnline PowerShell ─────────────────────────────────────
-        try:
-            import subprocess as _sp
-            ps_script = f"""
-            try {{
-                Import-Module MSOnline -ErrorAction Stop
-                # Use existing connection or connect with current credentials
-                try {{ Get-MsolDomain -ErrorAction Stop | Out-Null }}
-                catch {{ Connect-MsolService -ErrorAction Stop }}
-
-                $mfa = New-Object -TypeName Microsoft.Online.Administration.StrongAuthenticationRequirement
-                $mfa.RelyingParty = "*"
-                $mfa.State = "Enabled"
-                Set-MsolUser -UserPrincipalName '{upn}' -StrongAuthenticationRequirements @($mfa) -ErrorAction Stop
-                Write-Output 'SUCCESS'
-            }} catch {{
-                Write-Output "ERROR:$($_.Exception.Message)"
-            }}
-            """
-            r4 = _sp.run(
-                ["powershell", "-NoProfile", "-NonInteractive",
-                 "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-                capture_output=True, text=True, timeout=60,
-            )
-            if "SUCCESS" in r4.stdout:
-                return True, "Per-user MFA enabled (MSOnline PowerShell)"
-            if "ERROR:" in r4.stdout:
-                ps_err = r4.stdout.split("ERROR:", 1)[-1].strip()[:150]
-            else:
-                ps_err = (r4.stderr or r4.stdout)[:150]
-        except Exception as ex:
-            ps_err = str(ex)[:100]
+            if attempt < MFA_RETRY_COUNT - 1:
+                import time
+                time.sleep(10)
 
         # ── Check Security Defaults (only if confirmed ON via API) ────────────
         sd_on = self._security_defaults_enabled()
@@ -600,7 +832,7 @@ class O365Service:
         try:
             r = self._get(
                 f"{GRAPH_BETA}/policies/identitySecurityDefaultsEnforcementPolicy",
-                params={"$select": "isEnabled"},
+                params={SELECT_PARAM: "isEnabled"},
             )
             if r.status_code == 200:
                 return bool(r.json().get("isEnabled", False))
@@ -626,53 +858,6 @@ class O365Service:
             return False, f"mail PATCH failed: {err}"
         except Exception as e:
             return False, str(e)
-=======
-        body   = {"addLicenses": [{"skuId": sku_id}], "removeLicenses": []}
-        delays = [8, 20, 35, 50]
-        last_err = ""
-        upn = None
-
-        for i, delay in enumerate([0] + delays):
-            if delay:
-                _t.sleep(delay)
-            # Fall back to UPN after 2 tries
-            if i >= 2 and upn is None:
-                try:
-                    r0 = self._get(f"{GRAPH_BASE}/users/{user_id}?$select=userPrincipalName")
-                    if r0.status_code == 200:
-                        upn = r0.json().get("userPrincipalName")
-                except Exception:
-                    pass
-            identifier = upn if (i >= 2 and upn) else user_id
-            try:
-                r = self._post(f"{GRAPH_BASE}/users/{identifier}/assignLicense", body)
-                if r.status_code == 200:
-                    tag = f" (attempt {i+1})" if i else ""
-                    return True, f"License assigned{tag}"
-                err_body = {}
-                try:
-                    err_body = r.json()
-                except Exception:
-                    pass
-                last_err = err_body.get("error", {}).get("message", r.text[:200])
-                if any(x in last_err.lower() for x in
-                       ("already", "authorization", "forbidden",
-                        "does not exist", "invalid")):
-                    break
-            except Exception as e:
-                last_err = str(e)
-        return False, f"License failed after {len(delays)+1} attempts: {last_err}"
-
-    def enable_mfa(self, user_id: str) -> Tuple[bool, str]:
-        """
-        MFA cannot be reliably enabled via Graph API on this tenant.
-        Returns an informational message — MFA should be enabled manually.
-        """
-        return True, (
-            "ℹ Please enable MFA manually in Azure portal → "
-            "Users → Per-user MFA"
-        )
->>>>>>> Stashed changes
 
     def set_proxy_addresses(self, user_id: str, email: str,
                              employee_id: str = "") -> Tuple[bool, str]:
@@ -695,42 +880,8 @@ class O365Service:
         except Exception:
             pass
 
-        # Method 2: Use Exchange Online PowerShell
-        try:
-            # Build PowerShell command to set proxy addresses
-            alias_cmd = ""
-            if employee_id and domain:
-                alias_entry = f"{employee_id}@{domain}"
-                alias_cmd = (
-                    f"Set-Mailbox -Identity '{email}' "
-                    f"-EmailAddresses @{{Add='smtp:{alias_entry}'}} "
-                    f"-ErrorAction Stop\n"
-                    f"Write-Output 'ALIAS_OK'"
-                )
-            ps_script = (
-                "try {\n"
-                "    Import-Module ExchangeOnlineManagement -ErrorAction SilentlyContinue\n"
-                f"    Set-Mailbox -Identity '{email}' "
-                f"-WindowsEmailAddress '{email}' -ErrorAction Stop\n"
-                f"    {alias_cmd}\n"
-                "    Write-Output 'SUCCESS'\n"
-                "} catch {\n"
-                "    Write-Output \"ERROR:$($_.Exception.Message)\"\n"
-                "}\n"
-            )
-            import subprocess as _sp
-            r2 = _sp.run(
-                ["powershell", "-NoProfile", "-NonInteractive",
-                 "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-                capture_output=True, text=True, timeout=60,
-            )
-            if "SUCCESS" in r2.stdout or "ALIAS_OK" in r2.stdout:
-                return True, f"proxyAddresses set via Exchange PS: {', '.join(addrs)}"
-            if "ERROR:" in r2.stdout:
-                err_msg = r2.stdout.split("ERROR:", 1)[-1].strip()
-                return False, f"Exchange PS: {err_msg[:200]}"
-        except Exception as e:
-            pass
+        # PowerShell fallback removed to prevent interactive prompts.
+        # Graph API errors or read-only properties (sync errors) will be handled downstream.
 
         # Method 3: proxyAddresses will be synced from AD via AD Connect
         return False, (
@@ -749,7 +900,7 @@ class O365Service:
         # Method 1: Try Graph API (append to proxyAddresses)
         try:
             r = self._get(f"{GRAPH_BASE}/users/{user_id}",
-                          params={"$select": "proxyAddresses"})
+                          params={SELECT_PARAM: "proxyAddresses"})
             if r.status_code == 200:
                 current = r.json().get("proxyAddresses", [])
                 alias_entry = f"smtp:{alias_email}"
@@ -760,34 +911,18 @@ class O365Service:
                                  {"proxyAddresses": current})
                 if r2.status_code in (200, 204):
                     return True, f"Alias added via Graph: {alias_email}"
+                
+                try:
+                    msg = r2.json().get("error", {}).get("message", r2.text[:200])
+                    if "proxyAddresses' is read-only" in msg:
+                        return False, f"SYNC_ERROR: {msg}"
+                except Exception:
+                    pass
         except Exception:
             pass
 
-        # Method 2: Exchange Online PowerShell
-        try:
-            upn = self._get_upn(user_id) or alias_email.split("@")[0]
-            ps_script = (
-                "try {\n"
-                f"    Set-Mailbox -Identity '{upn}' "
-                f"-EmailAddresses @{{Add='smtp:{alias_email}'}} -ErrorAction Stop\n"
-                "    Write-Output 'SUCCESS'\n"
-                "} catch {\n"
-                "    Write-Output \"ERROR:$($_.Exception.Message)\"\n"
-                "}\n"
-            )
-            import subprocess as _sp
-            r3 = _sp.run(
-                ["powershell", "-NoProfile", "-NonInteractive",
-                 "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-                capture_output=True, text=True, timeout=60,
-            )
-            if "SUCCESS" in r3.stdout:
-                return True, f"Alias added via Exchange PS: {alias_email}"
-            if "ERROR:" in r3.stdout:
-                err_msg = r3.stdout.split("ERROR:", 1)[-1].strip()
-                return False, f"Exchange PS alias: {err_msg[:200]}"
-        except Exception:
-            pass
+        # Method 2: Exchange Online PowerShell fallback removed to bypass SentinelOne blocks
+        pass
 
         return False, (
             f"Could not set alias '{alias_email}' via Graph or Exchange PS. "
@@ -800,11 +935,12 @@ class O365Service:
         try:
             r = self._put(f"{GRAPH_BASE}/users/{user_id}/manager/$ref", body)
             if r.status_code == 204:
-                return True, "Manager set"
+                    return True, "Manager set"
             return False, r.text[:200]
         except Exception as e:
             return False, str(e)
 
+<<<<<<< HEAD
     def add_to_group(self, user_id: str, group_id: str) -> Tuple[bool, str]:
 <<<<<<< HEAD
         body = {"@odata.id": f"{GRAPH_BASE}/directoryObjects/{user_id}"}
@@ -819,43 +955,76 @@ class O365Service:
         except Exception as e:
             return False, str(e)
 =======
+=======
+    def add_to_groups_multi(self, user_id: str, group_items: List[Tuple[str, str]], admin_upn: str = "") -> List[Tuple[str, bool, str]]:
+>>>>>>> dev
         """
-        Add user to a group/DL, retrying twice with a 10-second pause.
-        Mail-enabled groups (M365 Groups, DLs) require an Exchange mailbox
-        which can take a moment to reflect after license assignment.
+        Add a user to multiple groups in a single session to avoid multiple login prompts.
+        group_items: List of (group_id, group_name)
+        Returns: List of (group_name, success, message)
         """
-        body = {"@odata.id": f"{GRAPH_BASE}/directoryObjects/{user_id}"}
-        last_err = ""
-        for attempt in range(3):   # 0, 1, 2
-            if attempt:
-                time.sleep(10)
-            try:
-                r = self._post(
-                    f"{GRAPH_BASE}/groups/{group_id}/members/$ref", body
-                )
-                if r.status_code == 204:
-                    tag = f" (attempt {attempt+1})" if attempt else ""
-                    return True, f"Added to group{tag}"
-                if r.status_code == 400 and "already exists" in r.text:
-                    return True, "Already a member"
-                last_err = r.text[:200]
-                # Stop retrying on clear auth / not-found errors
-                if r.status_code in (401, 403, 404):
-                    break
-            except Exception as e:
-                last_err = str(e)
+        if not group_items: return []
+        
+        results = []
+        upn = self._get_upn(user_id)
+        if not upn:
+            return [(name, False, "Could not resolve UPN") for _, name in group_items]
+
+        # 1. Try Graph API for all (Security, Unified, and DLs)
+        for gid, gname in group_items:
+            ok, msg = self.add_to_group(user_id, gid, admin_upn=admin_upn, skip_ps=True)
+            results.append((gname, ok, msg))
+        
+        return results
+
+    def add_to_group(self, user_id: str, group_id: str, admin_upn: str = "", skip_ps: bool = False) -> Tuple[bool, str]:
+        """Add user to a group (Security, O365 Group, or Distribution List)."""
+        # Format 1: OData Reference (Standard for Security/Unified groups)
+        body_ref = {"@odata.id": f"{GRAPH_BASE}/directoryObjects/{user_id}"}
+        # Format 2: Plain ID (Required for some legacy Distribution Lists)
+        body_plain = {"id": user_id}
+        
+        last_err = "Unknown error"
+        
+        # 1. Try Graph v1.0 - $ref with OData reference
+        try:
+            r = self._post(f"{GRAPH_BASE}/groups/{group_id}/members/$ref", body_ref)
+            if r.status_code in (204, 201): return True, "Added ($ref)"
+            err_msg = r.json().get("error", {}).get("message", r.text[:200])
+            if "already exists" in err_msg.lower(): return True, "Already a member"
+            last_err = err_msg
+        except Exception as e: last_err = str(e)
+
+        # 2. Try Graph v1.0 - Direct members with plain ID (Crucial for DLs)
+        try:
+            r = self._post(f"{GRAPH_BASE}/groups/{group_id}/members", body_plain)
+            if r.status_code in (204, 201): return True, "Added (Direct-ID)"
+            err_msg = r.json().get("error", {}).get("message", r.text[:200])
+            if "already exists" in err_msg.lower(): return True, "Already a member"
+            if "synchronized from your on-premises" in err_msg.lower():
+                return False, f"SYNC_ERROR: Group is synced from AD. Add user in AD instead."
+            last_err = err_msg
+        except Exception as e: last_err = str(e)
+
+        # 3. Try Graph v1.0 - Direct members with OData reference
+        try:
+            r = self._post(f"{GRAPH_BASE}/groups/{group_id}/members", body_ref)
+            if r.status_code in (204, 201): return True, "Added (Direct-OData)"
+        except Exception: pass
+
+        # 4. Try Graph Beta
+        try:
+            r = self._post(f"{GRAPH_BETA}/groups/{group_id}/members/$ref", body_ref)
+            if r.status_code in (200, 204): return True, "Added (Beta)"
+        except Exception: pass
+
         return False, last_err
 
-    def _find_service_principal(self, display_name: str) -> Optional[Dict]:
-        """Search for a service principal by exact then substring match."""
-        # 1. Exact match via $filter
+    def _find_sp_exact(self, display_name: str) -> Optional[Dict]:
         try:
             r = self._get(
                 f"{GRAPH_BASE}/servicePrincipals",
-                params={
-                    "$filter": f"displayName eq '{display_name}'",
-                    "$select": "id,displayName,appRoles",
-                },
+                params={"$filter": f"displayName eq '{display_name}'", SELECT_PARAM: SP_SELECT_FIELDS},
             )
             if r.status_code == 200:
                 vals = r.json().get("value", [])
@@ -863,34 +1032,28 @@ class O365Service:
                     return vals[0]
         except Exception:
             pass
+        return None
 
-        # 2. $search fallback (ConsistencyLevel: eventual required)
+    def _find_sp_search(self, display_name: str) -> Optional[Dict]:
         try:
             r = self._get(
                 f"{GRAPH_BASE}/servicePrincipals",
-                params={
-                    "$search": f'"displayName:{display_name}"',
-                    "$select": "id,displayName,appRoles",
-                    "$top": "20",
-                },
+                params={"$search": f'"displayName:{display_name}"', SELECT_PARAM: SP_SELECT_FIELDS, "$top": "20"},
                 extra_headers={"ConsistencyLevel": "eventual"},
             )
             if r.status_code == 200:
                 vals = r.json().get("value", [])
-                # Case-insensitive substring match
                 needle = display_name.lower()
                 for sp in vals:
                     if needle in sp.get("displayName", "").lower():
                         return sp
         except Exception:
             pass
+        return None
 
-        # 3. Broad list scan (paginate up to 3 pages)
+    def _find_sp_broad(self, display_name: str) -> Optional[Dict]:
         try:
-            url: Optional[str] = (
-                f"{GRAPH_BASE}/servicePrincipals"
-                "?$select=id,displayName,appRoles&$top=100"
-            )
+            url: Optional[str] = f"{GRAPH_BASE}/servicePrincipals?{SELECT_PARAM}={SP_SELECT_FIELDS}&$top=100"
             needle = display_name.lower()
             pages  = 0
             while url and pages < 3:
@@ -906,9 +1069,12 @@ class O365Service:
                     break
         except Exception:
             pass
-
         return None
 >>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
+
+    def _find_service_principal(self, display_name: str) -> Optional[Dict]:
+        """Search for a service principal by exact then substring match."""
+        return self._find_sp_exact(display_name) or self._find_sp_search(display_name) or self._find_sp_broad(display_name)
 
     def add_to_zoho_enterprise_app(self, user_id: str) -> Tuple[bool, str]:
         """Find Zoho Accounts enterprise app and assign the user to it."""
@@ -939,13 +1105,12 @@ class O365Service:
                 try:
                     r = self._get(
                         f"{GRAPH_BASE}/servicePrincipals/{ZOHO_APP_OBJECT_ID}",
-                        params={"$select": "id,displayName,appRoles"},
+                        params={SELECT_PARAM: SP_SELECT_FIELDS},
                     )
                     if r.status_code == 200:
                         sp = r.json()
                 except Exception:
                     pass
-<<<<<<< Updated upstream
 
             # Fall back to search by name
             if not sp:
@@ -963,6 +1128,7 @@ class O365Service:
                 (ar["id"] for ar in app_roles if ar.get("isEnabled", True)),
                 "00000000-0000-0000-0000-000000000000"
             )
+<<<<<<< HEAD
 =======
 
             # Fall back to search by name
@@ -987,6 +1153,8 @@ class O365Service:
             role_id = app_roles[0]["id"] if app_roles else "00000000-0000-0000-0000-000000000000"
 >>>>>>> Stashed changes
 >>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
+=======
+>>>>>>> dev
 
             body = {
                 "principalId": user_id,
@@ -996,6 +1164,7 @@ class O365Service:
             r2 = self._post(f"{GRAPH_BASE}/users/{user_id}/appRoleAssignments", body)
             if r2.status_code in (200, 201):
 <<<<<<< HEAD
+<<<<<<< HEAD
                 return True, "User added to Zoho Accounts enterprise app"
 =======
 <<<<<<< Updated upstream
@@ -1004,6 +1173,9 @@ class O365Service:
                 return True, f"User added to '{sp.get('displayName', 'Zoho Accounts')}' enterprise app"
 >>>>>>> Stashed changes
 >>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
+=======
+                return True, f"User added to '{sp.get('displayName','Zoho Accounts')}' enterprise app"
+>>>>>>> dev
             if r2.status_code == 409:
                 return True, "Already assigned to Zoho Accounts"
             return False, r2.text[:200]
@@ -1060,7 +1232,7 @@ class O365Service:
             return False, "Invalid alias email"
         try:
             r = self._get(f"{GRAPH_BASE}/users/{user_id}",
-                          params={"$select": "proxyAddresses,userPrincipalName"})
+                          params={SELECT_PARAM: "proxyAddresses,userPrincipalName"})
             if r.status_code != 200:
                 return False, f"Cannot read user (HTTP {r.status_code})"
             
@@ -1087,7 +1259,43 @@ class O365Service:
                 err = r2.json().get("error", {}).get("message", r2.text[:200])
             except Exception:
                 err = r2.text[:200]
+            if "read-only" in err:
+                return False, f"SYNC_ERROR: {err}"
             return False, f"Alias failed: {err}"
         except Exception as e:
             return False, str(e)
+<<<<<<< HEAD
 >>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
+=======
+
+    def send_mail(self, sender_email: str, sender_password: str, to_email: str, subject: str, body_text: str, cc_email: str = "") -> Tuple[bool, str]:
+        """
+        Send an email using SMTP.
+        """
+        import smtplib
+        from email.message import EmailMessage
+
+        if not sender_email or not sender_password or not to_email:
+            return False, "Sender email, password, or receiver email missing"
+        
+        msg = EmailMessage()
+        msg.set_content(body_text)
+        msg['Subject'] = subject
+        msg['From'] = sender_email
+        msg['To'] = to_email
+        if cc_email:
+            msg['Cc'] = cc_email
+
+        try:
+            # Connect to Office 365 SMTP server
+            server = smtplib.SMTP('smtp.office365.com', 587)
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+            server.quit()
+            return True, "Email sent successfully"
+        except smtplib.SMTPAuthenticationError:
+            return False, "Email sending failed: Authentication error (check password)"
+        except Exception as e:
+            return False, f"Email sending failed: {str(e)}"
+>>>>>>> dev

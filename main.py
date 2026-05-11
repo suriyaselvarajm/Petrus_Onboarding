@@ -17,8 +17,11 @@ def main():
     root.wait_window(splash)
 
     if not splash.success:
-        # User closed or critical failure
-        root.destroy()
+        # User closed or critical failure — window may already be destroyed
+        try:
+            root.destroy()
+        except Exception:
+            pass
         sys.exit(0)
 
     # ── Launch main application ────────────────────────────────────────────────
@@ -29,4 +32,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()

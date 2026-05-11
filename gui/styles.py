@@ -11,6 +11,7 @@ import tkinter as tk
 from tkinter import ttk
 
 # ── Color Palette ──────────────────────────────────────────────────────────────
+<<<<<<< HEAD
 C = {
 <<<<<<< HEAD
     "bg":          "#0D1117",   # Deep dark background
@@ -29,19 +30,16 @@ C = {
     "input_bg":    "#10161E",   # Input background
     "highlight":   "#264F78",   # Selection highlight
 =======
+=======
+# ── Color Palettes ────────────────────────────────────────────────────────────
+LIGHT = {
+>>>>>>> dev
     "bg":          "#F0F4F8",   # Light grey-blue background
     "surface":     "#FFFFFF",   # Card / panel surface (white)
-<<<<<<< Updated upstream
     "surface2":    "#E8EDF2",   # Secondary surface (slightly darker)
     "border":      "#CBD5E1",   # Borders
     "accent":      "#2563EB",   # Primary blue (vivid)
     "accent_h":    "#1D4ED8",   # Accent hover (deeper blue)
-=======
-    "surface2":    "#E8EDF2",   # Secondary surface
-    "border":      "#CBD5E1",   # Borders
-    "accent":      "#2563EB",   # Primary blue (vivid)
-    "accent_h":    "#1D4ED8",   # Accent hover
->>>>>>> Stashed changes
     "accent_dim":  "#DBEAFE",   # Light accent fill
     "success":     "#16A34A",   # Green
     "error":       "#DC2626",   # Red
@@ -49,34 +47,62 @@ C = {
     "text":        "#1E293B",   # Primary text (dark slate)
     "text_muted":  "#64748B",   # Secondary text
     "text_dim":    "#94A3B8",   # Dimmed text
-<<<<<<< Updated upstream
     "input_bg":    "#F8FAFC",   # Input background (very light)
-=======
-    "input_bg":    "#F8FAFC",   # Input background
->>>>>>> Stashed changes
     "highlight":   "#BFDBFE",   # Selection highlight
 >>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
 }
 
+DARK = {
+    "bg":          "#0F172A",   # Very dark navy
+    "surface":     "#1E293B",   # Dark slate surface
+    "surface2":    "#334155",   # Slightly lighter slate
+    "border":      "#475569",   # Darker borders
+    "accent":      "#3B82F6",   # Bright blue
+    "accent_h":    "#60A5FA",   # Lighter blue hover
+    "accent_dim":  "#1E3A8A",   # Deep navy accent fill
+    "success":     "#22C55E",   # Bright green
+    "error":       "#EF4444",   # Bright red
+    "warning":     "#F59E0B",   # Orange/Amber
+    "text":        "#F8FAFC",   # Near-white text
+    "text_muted":  "#94A3B8",   # Slate grey text
+    "text_dim":    "#64748B",   # Darker grey text
+    "input_bg":    "#0F172A",   # Background-colored inputs
+    "highlight":   "#3B82F6",   # Selection highlight
+}
+
+# Current theme reference (updated via apply_theme)
+C = LIGHT.copy()
+
 # ── Fonts ──────────────────────────────────────────────────────────────────────
+FONT_FAMILY = "Segoe UI"
+
 F = {
-    "title_lg": ("Segoe UI", 16, "bold"),
-    "title":    ("Segoe UI", 13, "bold"),
-    "subtitle": ("Segoe UI", 11, "bold"),
-    "body":     ("Segoe UI", 10),
-    "body_sm":  ("Segoe UI", 9),
-    "label":    ("Segoe UI", 9),
+    "title_lg": (FONT_FAMILY, 16, "bold"),
+    "title":    (FONT_FAMILY, 13, "bold"),
+    "subtitle": (FONT_FAMILY, 11, "bold"),
+    "subtitle_sm": (FONT_FAMILY, 9, "bold"),
+    "body":     (FONT_FAMILY, 10),
+    "body_sm":  (FONT_FAMILY, 9),
+    "label":    (FONT_FAMILY, 9),
     "mono":     ("Consolas",  9),
-    "status":   ("Segoe UI",  9),
+    "status":   (FONT_FAMILY,  9),
 }
 
 
+<<<<<<< HEAD
 def apply_theme(root: tk.Tk) -> None:
 <<<<<<< HEAD
     """Apply dark theme to all ttk widgets."""
 =======
     """Apply bright theme to all ttk widgets."""
 >>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
+=======
+def apply_theme(root: tk.Tk, is_dark: bool = False) -> None:
+    """Apply theme to all ttk widgets."""
+    global C
+    C.update(DARK if is_dark else LIGHT)
+    
+>>>>>>> dev
     s = ttk.Style(root)
     s.theme_use("clam")
 

@@ -1,157 +1,120 @@
-"""
-core/ad_service.py
-Active Directory operations via PowerShell subprocess.
-Designed for Windows domain-joined machines with RSAT tools installed.
-"""
-
+import ldap3
+from ldap3 import Server, Connection, ALL, NTLM, SUBTREE, MODIFY_REPLACE, Tls
+import ssl
 import subprocess
 import json
 from typing import Optional, List, Dict, Any, Tuple
 
 from config import (
-    AD_DOMAIN, AD_BASE_DN, AD_PETRUS_USERS_OU,
+    AD_DOMAIN, AD_SERVER, AD_BASE_DN, AD_PETRUS_USERS_OU,
     COMPANY_NAME, DEFAULT_COUNTRY_CODE,
     AD_ADMIN_USER, AD_ADMIN_PASSWORD,
 )
 
-
+from core.settings_manager import sm
 import os
-import tempfile
 
 
-# ── PowerShell runner ──────────────────────────────────────────────────────────
+ERROR_PREFIX = "ERROR:"
 
-def _ps(script: str, timeout: int = 45) -> Tuple[bool, str, str]:
-    """
-    Write script to a temp .ps1 file and run it with powershell -File.
-    Using -File is far more reliable on Windows than passing multiline
-    scripts via -Command (which has quoting/newline issues).
-    """
-    tmp_path = None
-    
-    # ── Inject explicit credentials if provided ──
-    script_header = ""
-    if AD_ADMIN_USER and AD_ADMIN_PASSWORD:
-        script_header = f"""
-        $sec_auth = ConvertTo-SecureString '{_esc(AD_ADMIN_PASSWORD)}' -AsPlainText -Force
-        $cred_auth = New-Object System.Management.Automation.PSCredential ('{_esc(AD_ADMIN_USER)}', $sec_auth)
-        $PSDefaultParameterValues = @{{ "*-AD*:Credential" = $cred_auth }}
-        """
-
-    full_script = script_header + script
-
-    try:
-        # Write script to a temp file
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".ps1",
-            delete=False, encoding="utf-8"
-        ) as f:
-            f.write(full_script)
-            tmp_path = f.name
-
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive",
-             "-ExecutionPolicy", "Bypass", "-File", tmp_path],
-            capture_output=True, text=True, timeout=timeout,
-        )
-        return r.returncode == 0, r.stdout.strip(), r.stderr.strip()
-
-    except subprocess.TimeoutExpired:
-        return False, "", f"PowerShell timed out after {timeout}s"
-    except FileNotFoundError:
-        return False, "", "powershell.exe not found — is this Windows?"
-    except Exception as e:
-        return False, "", str(e)
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-
-
-
-def _esc(value: str) -> str:
-    """Escape a value for use inside a PowerShell single-quoted string."""
-    if not value:
-        return ""
-    return str(value).replace("'", "''")
-
-
-def _clean_ps_err(raw: str) -> str:
-    """
-    Strips PowerShell noise from error output:
-    temp file paths, CategoryInfo, FullyQualifiedErrorId, '+' lines.
-    Returns just the human-readable first line of the exception.
-    """
-    if not raw:
-        return "Unknown error"
-    lines = []
-    for line in raw.splitlines():
-        stripped = line.strip()
-        # Skip PS noise lines
-        if any(stripped.startswith(x) for x in (
-            "+ ", "At ", "CategoryInfo", "FullyQualifiedErrorId",
-            "tmp", "C:\\Users",
-        )):
-            continue
-        if stripped:
-            lines.append(stripped)
-    # Return first meaningful line
-    clean = lines[0] if lines else raw.splitlines()[0]
-    # Remove temp file name prefix like "tmpXXX.ps1 : "
-    import re as _re
-    clean = _re.sub(r'^tmp\w+\.ps1\s*:\s*', '', clean)
-    clean = _re.sub(r'^.*\.ps1\s*:\s*', '', clean)
-    return clean.strip() or "Cannot connect to AD domain"
-
-
-# ── AD Service ─────────────────────────────────────────────────────────────────
+# ── AD Service (LDAP3 Implementation) ──────────────────────────────────────────
 
 class ADService:
 
     def __init__(self):
         self._connected = False
+        self._server_address = sm.get("ad_server") or sm.get("ad_domain") or AD_DOMAIN
+        self._session_user = None
+        self._session_password = None
+
+    def _get_connection(self) -> Connection:
+        """Create and bind an LDAP connection using config or session credentials over LDAPS."""
+        tls_config = Tls(validate=ssl.CERT_NONE, version=ssl.PROTOCOL_TLSv1_2)
+        server = Server(self._server_address, port=636, use_ssl=True, tls=tls_config, get_info=ALL)
+        
+        user = self._session_user or AD_ADMIN_USER
+        password = self._session_password or AD_ADMIN_PASSWORD
+
+        if not user:
+            raise ValueError("Authentication required. Please sign in.")
+
+        if user and "\\" not in user and "@" not in user:
+            domain = sm.get("ad_domain") or AD_DOMAIN
+            user = f"{user}@{domain}"
+
+        # Use SIMPLE authentication
+        conn = Connection(
+            server, 
+            user=user, 
+            password=password, 
+            authentication=ldap3.SIMPLE,
+            auto_bind=True
+        )
+        return conn
 
     # ── Connection ────────────────────────────────────────────────────────────
 
     def test_connection(self) -> Tuple[bool, str]:
-        # Write-Output the error so it comes through stdout (clean, no stack trace)
-        script = f"""
-        try {{
-            Import-Module ActiveDirectory -ErrorAction Stop
-            $d = Get-ADDomain -Server '{AD_DOMAIN}' -ErrorAction Stop
-            Write-Output "OK:$($d.DNSRoot)"
-        }} catch {{
-            Write-Output "ERR:$($_.Exception.Message)"
-        }}
-        """
-        ok, out, err = _ps(script, timeout=80)   # generous — first PS run is slow
-        if out.startswith("OK:"):
-            self._connected = True
-            return True, out[3:]
-        # Extract error from stdout ERR: prefix, fall back to stderr
-        if out.startswith("ERR:"):
-            return False, out[4:].strip()
-        return False, _clean_ps_err(err or out)
+        if not (self._session_user or AD_ADMIN_USER):
+            return False, "Authentication required"
+        try:
+            with self._get_connection() as conn:
+                self._connected = True
+                return True, "Connected"
+        except Exception as e:
+            return False, str(e)
+
+    def authenticate_and_check_permission(self, username: str, password: str) -> Tuple[bool, str]:
+        """Verify credentials and check 'Domain Admins' membership via LDAPS."""
+        try:
+            tls_config = Tls(validate=ssl.CERT_NONE, version=ssl.PROTOCOL_TLSv1_2)
+            server = Server(self._server_address, port=636, use_ssl=True, tls=tls_config, get_info=ALL)
+            
+            # Format user for SIMPLE bind (UPN format: user@domain)
+            auth_user = username
+            if "\\" not in username and "@" not in username:
+                domain = sm.get("ad_domain") or AD_DOMAIN
+                auth_user = f"{username}@{domain}"
+            
+            # Use SIMPLE authentication
+            with Connection(server, user=auth_user, password=password, authentication=ldap3.SIMPLE) as conn:
+                if not conn.bind():
+                    return False, "Authentication Failed: Invalid credentials"
+                
+                # Check group membership
+                conn.search(
+                    search_base=AD_BASE_DN,
+                    search_filter=f'(&(objectClass=user)(sAMAccountName={username}))',
+                    attributes=['memberOf', 'distinguishedName']
+                )
+                if not conn.entries:
+                    return False, "User not found in directory"
+                
+                user_entry = conn.entries[0]
+                groups = user_entry.memberOf.value if 'memberOf' in user_entry else []
+                is_admin = any('CN=Domain Admins' in g for g in groups)
+                
+                if is_admin:
+                    # Save these credentials for the current session
+                    self._session_user = username
+                    self._session_password = password
+                    self._connected = True
+                    return True, "Authenticated and verified as Domain Admin"
+                return False, "User authenticated but is not a member of 'Domain Admins'"
+        except Exception as e:
+            return False, f"Error checking permissions: {str(e)}"
 
     def check_ad_sync(self) -> Tuple[bool, str]:
-        """Check if Azure AD Connect (ADSync) service is running."""
-        script = """
-        try {
-            $s = Get-Service -Name ADSync -ErrorAction Stop
-            Write-Output $s.Status
-        } catch {
-            Write-Output "NOT_INSTALLED"
-        }
         """
-        ok, out, _ = _ps(script, timeout=20)
-        running = "Running" in out
-        return running, out
+        Passive check for AD Sync status.
+        Removed PowerShell call to bypass SentinelOne security blocks.
+        """
+        return False, "Status Unknown (Security Hardened)"
 
     # ── Query helpers ─────────────────────────────────────────────────────────
 
     def user_exists(self, sam: str) -> bool:
+<<<<<<< HEAD
         script = f"""
         try {{
             Import-Module ActiveDirectory -ErrorAction Stop
@@ -186,70 +149,100 @@ class ADService:
         }}
         """
         _, out, _ = _ps(script, timeout=40)
+=======
+>>>>>>> dev
         try:
-            data = json.loads(out)
-            # Single object comes back as dict, not list
-            if isinstance(data, dict):
-                data = [data]
-            return data
+            with self._get_connection() as conn:
+                conn.search(AD_BASE_DN, f'(sAMAccountName={sam})', attributes=['sAMAccountName'])
+                return len(conn.entries) > 0
+        except Exception:
+            return False
+
+    def get_ous(self, base: str = None, scope: str = "LEVEL") -> List[Dict]:
+        search_base = base or AD_PETRUS_USERS_OU
+        ldap_scope = ldap3.LEVEL if scope == "OneLevel" else ldap3.SUBTREE
+        try:
+            with self._get_connection() as conn:
+                conn.search(
+                    search_base=search_base,
+                    search_filter='(objectClass=organizationalUnit)',
+                    search_scope=ldap_scope,
+                    attributes=['name', 'distinguishedName']
+                )
+                return [{"Name": e.name.value, "DistinguishedName": e.distinguishedName.value} for e in conn.entries]
         except Exception:
             return []
 
     def get_groups(self, search_base: str = None) -> List[Dict]:
-        """List AD groups under the Petrus Users OU subtree."""
-        base = search_base or AD_PETRUS_USERS_OU
-        script = f"""
-        try {{
-            Import-Module ActiveDirectory -ErrorAction Stop
-            $grps = Get-ADGroup -Filter * `
-                        -SearchBase '{_esc(base)}' `
-                        -Server '{AD_DOMAIN}' `
-                        -SearchScope Subtree `
-                        -Properties Name,DistinguishedName,GroupCategory |
-                    Select-Object Name,DistinguishedName,GroupCategory |
-                    ConvertTo-Json -Compress
-            if ($grps) {{ Write-Output $grps }} else {{ Write-Output '[]' }}
-        }} catch {{ Write-Output '[]' }}
-        """
-        _, out, _ = _ps(script, timeout=40)
-        try:
-            data = json.loads(out)
-            if isinstance(data, dict):
-                data = [data]
-            return data
-        except Exception:
-            return []
+        from config import AD_GROUPS_BASE_OU, AD_PETRUS_USERS_OU
+        base = search_base or AD_GROUPS_BASE_OU
+        
+        # We try a multi-stage search for maximum reliability
+        bases_to_try = []
+        if base: bases_to_try.append(base)
+        if AD_PETRUS_USERS_OU and AD_PETRUS_USERS_OU not in bases_to_try:
+            bases_to_try.append(AD_PETRUS_USERS_OU)
+            
+        search_filter = '(|(objectClass=group)(objectCategory=group))'
+        
+        for current_base in bases_to_try:
+            print(f"[DEBUG] AD get_groups: Attempting search in '{current_base}'...")
+            try:
+                with self._get_connection() as conn:
+                    conn.search(
+                        search_base=current_base,
+                        search_filter=search_filter,
+                        search_scope=SUBTREE,
+                        attributes=['cn', 'name', 'sAMAccountName', 'distinguishedName', 'displayName']
+                    )
+                    
+                    if not conn.entries:
+                        print(f"[DEBUG] AD get_groups: No groups found in '{current_base}'.")
+                        continue
+                        
+                    results = []
+                    for e in conn.entries:
+                        name = ""
+                        for attr in ['cn', 'name', 'sAMAccountName', 'displayName']:
+                            if hasattr(e, attr) and getattr(e, attr):
+                                val = getattr(e, attr).value
+                                if val:
+                                    name = str(val)
+                                    break
+                        if name:
+                            results.append({
+                                "Name": name, 
+                                "DistinguishedName": e.distinguishedName.value,
+                                "GroupCategory": "Security" # Default to Security as fallback
+                            })
+                    
+                    if results:
+                        print(f"[DEBUG] AD get_groups: Successfully found {len(results)} groups in '{current_base}'.")
+                        return results
+            except Exception as e:
+                print(f"[DEBUG] AD get_groups: Search failed in '{current_base}': {str(e)}")
+                
+        return []
 
     def get_manager_dn(self, upn: str) -> Optional[str]:
-        """Resolve a manager's UPN to their DistinguishedName."""
-        script = f"""
-        try {{
-            Import-Module ActiveDirectory -ErrorAction Stop
-            $u = Get-ADUser -Filter {{UserPrincipalName -eq '{_esc(upn)}'}} `
-                 -Server '{AD_DOMAIN}'
-            Write-Output $u.DistinguishedName
-        }} catch {{ Write-Output '' }}
-        """
-        _, out, _ = _ps(script)
-        return out if out else None
+        try:
+            with self._get_connection() as conn:
+                conn.search(AD_BASE_DN, f'(userPrincipalName={upn})', attributes=['distinguishedName'])
+                return conn.entries[0].distinguishedName.value if conn.entries else None
+        except Exception:
+            return None
 
     def get_user_dn(self, sam: str) -> Optional[str]:
-        script = f"""
-        try {{
-            Import-Module ActiveDirectory -ErrorAction Stop
-            $u = Get-ADUser -Identity '{_esc(sam)}' -Server '{AD_DOMAIN}'
-            Write-Output $u.DistinguishedName
-        }} catch {{ Write-Output '' }}
-        """
-        _, out, _ = _ps(script)
-        return out if out else None
+        try:
+            with self._get_connection() as conn:
+                conn.search(AD_BASE_DN, f'(sAMAccountName={sam})', attributes=['distinguishedName'])
+                return conn.entries[0].distinguishedName.value if conn.entries else None
+        except Exception:
+            return None
 
     # ── Create User ───────────────────────────────────────────────────────────
 
     def create_user(self, data: Dict[str, Any]) -> Tuple[bool, str]:
-        """
-        Create a new AD user. Returns (success, sam_or_error_message).
-        """
         first    = data["first_name"]
         last     = data["last_name"]
         email    = data["email"]
@@ -259,107 +252,179 @@ class ADService:
         password = data.get("password", "Welcome@123")
         manager_dn = data.get("ad_manager_dn", "")
 
-        e = _esc   # alias for brevity
+        user_dn = f"CN={display},{ou}"
+        
+        attrs = {
+            'objectClass': ['top', 'person', 'organizationalPerson', 'user'],
+            'cn': display,
+            'sn': last,
+            'givenName': first,
+            'displayName': display,
+            'sAMAccountName': sam,
+            'userPrincipalName': email,
+            'mail': email,
+            'title': data.get("job_title", ""),
+            'department': data.get("department", ""),
+            'mobile': data.get("mobile", ""),
+            'streetAddress': data.get("street", ""),
+            'l': data.get("city", "Coimbatore"),
+            'st': data.get("state", "Tamil Nadu"),
+            'postalCode': data.get("zip", "641006"),
+            'c': 'IN',
+            'co': 'India',
+            'countryCode': int(DEFAULT_COUNTRY_CODE),
+            'company': COMPANY_NAME,
+            'employeeID': data.get("employee_id", ""),
+            'employeeNumber': data.get("employee_id", ""),
+            'userAccountControl': '514' # Create disabled first to avoid 'unwillingToPerform' on Port 389
+        }
+        
+        if manager_dn:
+            attrs['manager'] = manager_dn
 
-        manager_line = (
-            f"-Manager '{e(manager_dn)}' `" if manager_dn else ""
-        )
+        # Proxy addresses (SMTP primary + smtp:alias)
+        emp_id = data.get("employee_id", "")
+        proxy_addrs = [f"SMTP:{email}"]
+        if emp_id:
+            domain = email.split("@")[1] if "@" in email else ""
+            if domain:
+                proxy_addrs.append(f"smtp:{emp_id}@{domain}")
+        attrs['proxyAddresses'] = proxy_addrs
 
-        script = f"""
-        try {{
-            Import-Module ActiveDirectory -ErrorAction Stop
-            $pwd = ConvertTo-SecureString '{e(password)}' -AsPlainText -Force
+        try:
+            with self._get_connection() as conn:
+                # 1. Add user
+                if not conn.add(user_dn, attributes=attrs):
+                    return False, f"Failed to create user object: {conn.result['description']}"
+                
+                # 2. Set password (requires LDAPS for password)
+                encoded_pwd = f'"{password}"'.encode('utf-16-le')
+                pwd_ok = conn.modify(user_dn, {'unicodePwd': [(MODIFY_REPLACE, [encoded_pwd])]})
+                
+                # 3. Enable account and set 'Change Password At Logon'
+                enable_ok = conn.modify(user_dn, {
+                    'userAccountControl': [(MODIFY_REPLACE, [512])],
+                    'pwdLastSet': [(MODIFY_REPLACE, [0])]
+                })
+                
+                if not pwd_ok or not enable_ok:
+                    return True, f"{sam} (Warning: Account created but remains DISABLED. Password policy or non-SSL connection prevented enablement. Please enable manually.)"
 
-            New-ADUser `
-                -Name            '{e(display)}' `
-                -GivenName       '{e(first)}' `
-                -Surname         '{e(last)}' `
-                -SamAccountName  '{e(sam)}' `
-                -UserPrincipalName '{e(email)}' `
-                -EmailAddress    '{e(email)}' `
-                -DisplayName     '{e(display)}' `
-                -Path            '{e(ou)}' `
-                -AccountPassword $pwd `
-                -ChangePasswordAtLogon $true `
-                -Enabled         $true `
-                -Title           '{e(data.get("job_title",""))}' `
-                -Department      '{e(data.get("department",""))}' `
-                -Office          '{e(data.get("office","Coimbatore"))}' `
-                -MobilePhone     '{e(data.get("mobile",""))}' `
-                -StreetAddress   '{e(data.get("street",""))}' `
-                -City            '{e(data.get("city","Coimbatore"))}' `
-                -State           '{e(data.get("state","Tamil Nadu"))}' `
-                -PostalCode      '{e(data.get("zip","641006"))}' `
-                -Country         'IN' `
-                -Company         '{e(COMPANY_NAME)}' `
-                -EmployeeID      '{e(data.get("employee_id",""))}' `
-                -EmployeeNumber  '{e(data.get("employee_id",""))}' `
-                {manager_line}
-                -Server          '{AD_DOMAIN}' `
-                -ErrorAction Stop
+                return True, sam
+        except Exception as e:
+            return False, str(e)
 
-            # ── Set extended attributes ──────────────────────────────
-            $user = Get-ADUser -Filter {{SamAccountName -eq '{e(sam)}'}} `
-                        -Server '{AD_DOMAIN}' -ErrorAction Stop
+    def disable_user(self, sam: str) -> Tuple[bool, str]:
+        try:
+            dn = self.get_user_dn(sam)
+            if not dn: return False, "User not found"
+            with self._get_connection() as conn:
+                # 514 = Normal Account + Disabled
+                conn.modify(dn, {'userAccountControl': [(MODIFY_REPLACE, [514])]})
+                return True, "AD account disabled"
+        except Exception as e:
+            return False, str(e)
 
-            $attrs = @{{
-                countryCode  = [int]{DEFAULT_COUNTRY_CODE};
-                c            = 'IN';
-                co           = 'India';
-                employeeType = '{e(data.get("employee_type","Full Time"))}';
-            }}
-            Set-ADUser $user -Replace $attrs -Server '{AD_DOMAIN}'
+    def set_proxy_addresses(self, sam: str, addresses: List[str]) -> Tuple[bool, str]:
+        try:
+            dn = self.get_user_dn(sam)
+            if not dn: return False, "User not found"
+            with self._get_connection() as conn:
+                conn.modify(dn, {'proxyAddresses': [(MODIFY_REPLACE, addresses)]})
+                return True, "Proxy addresses updated in AD"
+        except Exception as e:
+            return False, str(e)
 
-            Write-Output 'SUCCESS:{e(sam)}'
-        }} catch {{
-            Write-Output "ERROR:$($_.Exception.Message)"
-        }}
-        """
-        ok, out, err = _ps(script, timeout=90)
-        if "SUCCESS:" in out:
-            return True, sam
-        msg = (err or out or "Unknown error").replace("ERROR:", "").strip()
-        return False, msg
+    def add_user_to_group(self, sam: str, group_dn: str) -> Tuple[bool, str]:
+        try:
+            user_dn = self.get_user_dn(sam)
+            if not user_dn: return False, "User not found"
+            with self._get_connection() as conn:
+                conn.modify(group_dn, {'member': [(ldap3.MODIFY_ADD, [user_dn])]})
+                return True, "Added to AD group"
+        except Exception as e:
+            return False, str(e)
 
-    # ── Post-Creation ─────────────────────────────────────────────────────────
+    def delete_user(self, sam: str) -> Tuple[bool, str]:
+        try:
+            dn = self.get_user_dn(sam)
+            if not dn: return False, "User not found"
+            with self._get_connection() as conn:
+                conn.delete(dn)
+                return True, "AD account deleted"
+        except Exception as e:
+            return False, str(e)
 
-    def set_proxy_addresses(self, sam: str, email: str, employee_id: str) -> Tuple[bool, str]:
-        domain = email.split("@")[1] if "@" in email else ""
-        primary   = f"SMTP:{email}"
-        secondary = f"smtp:{employee_id}@{domain}" if domain else ""
-        addrs = f"'{primary}'" + (f",'{secondary}'" if secondary else "")
+    def search_user(self, query: str) -> List[Dict]:
+        """Search for users by display name, sAMAccountName, or mail."""
+        try:
+            with self._get_connection() as conn:
+                conn.search(
+                    search_base=AD_BASE_DN,
+                    search_filter=(
+                        f'(&(objectClass=user)(objectCategory=person)'
+                        f'(|(displayName=*{query}*)(sAMAccountName=*{query}*)(mail=*{query}*)))'
+                    ),
+                    search_scope=SUBTREE,
+                    attributes=['displayName', 'sAMAccountName', 'mail', 'title',
+                                'department', 'telephoneNumber', 'mobile',
+                                'manager', 'distinguishedName', 'userPrincipalName', 'employeeID']
+                )
+                results = []
+                for e in conn.entries:
+                    def _v(attr, _e=e):
+                        try: return getattr(_e, attr).value or ""
+                        except Exception: return ""
+                    manager_dn   = _v("manager")
+                    manager_name = ""
+                    if manager_dn:
+                        try:
+                            conn.search(AD_BASE_DN, f'(distinguishedName={manager_dn})',
+                                        attributes=['displayName'])
+                            if conn.entries:
+                                manager_name = conn.entries[0].displayName.value or ""
+                        except Exception: pass
+                    results.append({
+                        "displayName":       _v("displayName"),
+                        "sAMAccountName":    _v("sAMAccountName"),
+                        "mail":              _v("mail"),
+                        "title":             _v("title"),
+                        "department":        _v("department"),
+                        "mobile":            _v("mobile") or _v("telephoneNumber"),
+                        "manager_dn":        manager_dn,
+                        "manager_name":      manager_name,
+                        "distinguishedName": _v("distinguishedName"),
+                        "userPrincipalName": _v("userPrincipalName"),
+                        "employeeID":        _v("employeeID"),
+                    })
+                return results
+        except Exception as e:
+            print(f"[AD] search_user error: {e}")
+            return []
 
-        script = f"""
-        try {{
-            Import-Module ActiveDirectory -ErrorAction Stop
-            $user = Get-ADUser -Identity '{_esc(sam)}' -Server '{AD_DOMAIN}'
-            Set-ADUser $user `
-                -Replace @{{proxyAddresses=@({addrs})}} `
-                -Server '{AD_DOMAIN}' `
-                -ErrorAction Stop
-            Write-Output 'SUCCESS'
-        }} catch {{
-            Write-Output "ERROR:$($_.Exception.Message)"
-        }}
-        """
-        _, out, err = _ps(script)
-        ok = "SUCCESS" in out
-        return ok, (err or out).replace("ERROR:", "").strip()
-
-    def add_to_group(self, sam: str, group_dn: str) -> Tuple[bool, str]:
-        script = f"""
-        try {{
-            Import-Module ActiveDirectory -ErrorAction Stop
-            Add-ADGroupMember `
-                -Identity '{_esc(group_dn)}' `
-                -Members  '{_esc(sam)}' `
-                -Server   '{AD_DOMAIN}' `
-                -ErrorAction Stop
-            Write-Output 'SUCCESS'
-        }} catch {{
-            Write-Output "ERROR:$($_.Exception.Message)"
-        }}
-        """
-        _, out, err = _ps(script)
-        ok = "SUCCESS" in out
-        return ok, (err or out).replace("ERROR:", "").strip()
+    def update_user_profile(self, sam: str, changes: Dict[str, Any]) -> Tuple[bool, str]:
+        """Update profile fields (title, department, mobile, manager) in AD."""
+        try:
+            dn = self.get_user_dn(sam)
+            if not dn:
+                return False, "User not found in Active Directory"
+            field_map = {
+                "title":      "title",
+                "department": "department",
+                "mobile":     "mobile",       # Telephones tab in AD (NOT General tab)
+                "manager_dn": "manager",
+            }
+            mods = {}
+            for key, attr in field_map.items():
+                if key in changes:
+                    val = changes[key]
+                    mods[attr] = [(MODIFY_REPLACE, [val])] if val else [(MODIFY_REPLACE, [])]
+            if not mods:
+                return True, "No changes to apply"
+            with self._get_connection() as conn:
+                conn.modify(dn, mods)
+                if conn.result["result"] == 0:
+                    return True, "AD profile updated successfully"
+                return False, conn.result.get("description", "Unknown LDAP error")
+        except Exception as e:
+            return False, str(e)

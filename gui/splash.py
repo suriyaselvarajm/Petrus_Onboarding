@@ -12,9 +12,7 @@ import threading
 import queue
 
 from gui.styles import C, F, apply_theme
-from core.dependency_checker import (
-    DependencyCheck, check_az_logged_in, do_az_login,
-)
+from core.dependency_checker import DependencyCheck
 
 
 class SplashScreen(tk.Toplevel):
@@ -120,13 +118,15 @@ class SplashScreen(tk.Toplevel):
                     self._do_progress(msg[1], msg[2])
                 elif kind == "status":
                     self._do_status(msg[1], msg[2])
-                elif kind == "az_login":
-                    self._prompt_az_login()
-                elif kind == "az_ok":
-                    self._do_log("[OK] Azure CLI authenticated successfully")
+                elif kind == "msal_login":
+                    self._prompt_msal_login()
+                elif kind == "msal_ok":
+                    self._do_log("[OK] O365 authenticated successfully")
                     self._complete(True)
-                elif kind == "az_timeout":
-                    self._do_status("❌ Azure login timed out. Close and retry.", C["error"])
+                elif kind == "msal_error":
+                    self._do_status(f"❌ Login failed: {msg[1]}", C["error"])
+                    self._do_log(f"[ERROR] MSAL login: {msg[1]}")
+                    self._complete(False)
                 elif kind == "complete":
                     self._complete(msg[1])
                     return          # stop polling — splash will close
@@ -179,9 +179,11 @@ class SplashScreen(tk.Toplevel):
             for w in warnings:
                 self._q.put(("log", f"[WARN] {w}"))
 
-            # Check Azure CLI login
-            if not check_az_logged_in():
-                self._q.put(("az_login",))
+            # Check O365 authentication (MSAL)
+            from core.credential_manager import cred_manager, SCOPES_GRAPH
+            token = cred_manager.get_token(SCOPES_GRAPH)
+            if not token:
+                self._q.put(("msal_login",))
             else:
                 self._q.put(("complete", True))
 
@@ -195,25 +197,26 @@ class SplashScreen(tk.Toplevel):
                    style="Danger.TButton",
                    command=self.destroy).pack(padx=4, pady=4)
 
-    def _prompt_az_login(self) -> None:
-        self._do_progress(95, "Azure CLI login required")
-        self._do_log("\n[INFO] Not authenticated — opening browser for Azure login…")
+    def _prompt_msal_login(self) -> None:
+        self._do_progress(95, "O365 login required")
+        self._do_log("\n[INFO] Not authenticated — opening browser for O365 login…")
         self._do_status(
-            "⏳ Waiting for Azure login… (sign in with your admin account)",
+            "⏳ Waiting for O365 login… (sign in with your admin account)",
             C["warning"])
-        do_az_login()
-        # Poll login in background, push result to queue
-        threading.Thread(target=self._wait_for_az_login, daemon=True).start()
+        
+        hwnd = self.winfo_id()  # Capture HWND on main thread before starting background thread
+        def run_login():
+            from core.credential_manager import cred_manager, SCOPES_GRAPH
+            try:
+                result = cred_manager.login_interactive(SCOPES_GRAPH, parent_window_handle=hwnd)
+                if "access_token" in result:
+                    self._q.put(("msal_ok",))
+                else:
+                    self._q.put(("msal_error", result.get("error_description", "Unknown error")))
+            except Exception as e:
+                self._q.put(("msal_error", str(e)))
 
-    def _wait_for_az_login(self, attempt: int = 0) -> None:
-        """Background thread: poll every 3 s until az login completes."""
-        import time
-        for i in range(41):          # max ~2 minutes
-            time.sleep(3)
-            if check_az_logged_in():
-                self._q.put(("az_ok",))
-                return
-        self._q.put(("az_timeout",))
+        threading.Thread(target=run_login, daemon=True).start()
 
     def _complete(self, success: bool) -> None:
         self._done = True
