@@ -172,7 +172,11 @@ class ADService:
             $ous = Get-ADOrganizationalUnit -Filter * `
                        -SearchBase '{_esc(search_base)}' `
                        -Server '{AD_DOMAIN}' `
+<<<<<<< HEAD
                        -SearchScope OneLevel `
+=======
+                       -SearchScope Subtree `
+>>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
                        -Properties Name,DistinguishedName |
                    Select-Object Name,DistinguishedName |
                    ConvertTo-Json -Compress

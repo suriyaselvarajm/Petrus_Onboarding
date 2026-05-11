@@ -1,6 +1,10 @@
 """
 gui/styles.py
+<<<<<<< HEAD
 Dark-theme style definitions for the Petrus Onboarding Tool.
+=======
+Bright-theme style definitions for the Petrus Onboarding Tool.
+>>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
 """
 
 import tkinter as tk
@@ -8,6 +12,7 @@ from tkinter import ttk
 
 # ── Color Palette ──────────────────────────────────────────────────────────────
 C = {
+<<<<<<< HEAD
     "bg":          "#0D1117",   # Deep dark background
     "surface":     "#161B22",   # Card / panel surface
     "surface2":    "#1C2128",   # Secondary surface
@@ -23,6 +28,34 @@ C = {
     "text_dim":    "#484F58",   # Dimmed text
     "input_bg":    "#10161E",   # Input background
     "highlight":   "#264F78",   # Selection highlight
+=======
+    "bg":          "#F0F4F8",   # Light grey-blue background
+    "surface":     "#FFFFFF",   # Card / panel surface (white)
+<<<<<<< Updated upstream
+    "surface2":    "#E8EDF2",   # Secondary surface (slightly darker)
+    "border":      "#CBD5E1",   # Borders
+    "accent":      "#2563EB",   # Primary blue (vivid)
+    "accent_h":    "#1D4ED8",   # Accent hover (deeper blue)
+=======
+    "surface2":    "#E8EDF2",   # Secondary surface
+    "border":      "#CBD5E1",   # Borders
+    "accent":      "#2563EB",   # Primary blue (vivid)
+    "accent_h":    "#1D4ED8",   # Accent hover
+>>>>>>> Stashed changes
+    "accent_dim":  "#DBEAFE",   # Light accent fill
+    "success":     "#16A34A",   # Green
+    "error":       "#DC2626",   # Red
+    "warning":     "#D97706",   # Amber
+    "text":        "#1E293B",   # Primary text (dark slate)
+    "text_muted":  "#64748B",   # Secondary text
+    "text_dim":    "#94A3B8",   # Dimmed text
+<<<<<<< Updated upstream
+    "input_bg":    "#F8FAFC",   # Input background (very light)
+=======
+    "input_bg":    "#F8FAFC",   # Input background
+>>>>>>> Stashed changes
+    "highlight":   "#BFDBFE",   # Selection highlight
+>>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
 }
 
 # ── Fonts ──────────────────────────────────────────────────────────────────────
@@ -39,7 +72,11 @@ F = {
 
 
 def apply_theme(root: tk.Tk) -> None:
+<<<<<<< HEAD
     """Apply dark theme to all ttk widgets."""
+=======
+    """Apply bright theme to all ttk widgets."""
+>>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
     s = ttk.Style(root)
     s.theme_use("clam")
 
@@ -112,7 +149,11 @@ def apply_theme(root: tk.Tk) -> None:
 
     # -- TScrollbar --
     s.configure("TScrollbar",
+<<<<<<< HEAD
         background=C["surface"], troughcolor=C["bg"],
+=======
+        background=C["surface2"], troughcolor=C["bg"],
+>>>>>>> 7ae16ae250dc44223ef24c615966296e203a90ad
         arrowcolor=C["text_muted"], borderwidth=0, width=10,
     )
 
