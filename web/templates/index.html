@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="dark-theme">
+    <div id="app">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-box">🚀</div>
+                <div class="company-name">
+                    <h1>PETRUS</h1>
+                    <span>ONBOARDING</span>
+                </div>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <a href="#dashboard" class="nav-item active" data-view="dashboard">
+                    <i data-lucide="layout-dashboard"></i>
+                    <span>Dashboard</span>
+                </a>
+                <a href="#onboarding" class="nav-item" data-view="onboarding">
+                    <i data-lucide="user-plus"></i>
+                    <span>New Employee</span>
+                </a>
+                <a href="#offboarding" class="nav-item" data-view="offboarding">
+                    <i data-lucide="user-minus"></i>
+                    <span>Off-boarding</span>
+                </a>
+                <a href="#profile-update" class="nav-item" data-view="profile-update">
+                    <i data-lucide="user-cog"></i>
+                    <span>Update Profile</span>
+                </a>
+                <a href="#settings" class="nav-item" data-view="settings">
+                    <i data-lucide="settings"></i>
+                    <span>Settings</span>
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <div class="status-item" id="o365-status" style="cursor: pointer;" title="Click to Reconnect M365">
+                        <span class="dot red"></span>
+                        <div class="status-labels">
+                            <span class="status-label">Microsoft 365</span>
+                            <small class="status-sub">Disconnected</small>
+                        </div>
+                    </div>
+                    <div class="status-item" id="ad-status">
+                        <span class="dot red"></span>
+                        <div class="status-labels">
+                            <span class="status-label">Active Directory</span>
+                            <small class="status-sub">Connecting...</small>
+                        </div>
+                    </div>
+                </div>
+                <div class="current-user-box" id="user-display">
+                    <div class="user-avatar" id="user-avatar">?</div>
+                    <div class="user-info">
+                        <span id="user-name">Guest</span>
+                        <small>Administrator</small>
+                    </div>
+                </div>
+                <button class="logout-btn" id="logout-btn">
+                    <i data-lucide="log-out"></i>
+                    <span>Logout</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header class="top-header">
+                <div class="page-title">
+                    <h2 id="view-title">Dashboard</h2>
+                </div>
+                <div class="header-actions">
+                    <button class="refresh-btn" title="Refresh Connections">
+                        <i data-lucide="refresh-cw"></i>
+                    </button>
+                    <div class="user-profile">
+                        <img id="header-user-avatar" src="https://ui-avatars.com/api/?name=Admin&background=0D8ABC&color=fff" alt="User">
+                        <span id="header-user-name">Loading...</span>
+                    </div>
+                </div>
+            </header>
+
+            <div id="view-container" class="view-container">
+                <!-- Views will be injected here -->
+            </div>
+        </main>
+    </div>
+
+    <!-- Modals / Notifications -->
+    <div id="notification-area"></div>
+
+    <!-- Login Overlay -->
+    <div id="login-overlay" class="login-overlay">
+        <div class="login-card">
+            <div class="login-header">
+                <div class="logo-box">🚀</div>
+                <h2>Sign In</h2>
+                <p>Authenticate with your AD credentials</p>
+            </div>
+            <form id="login-form">
+                <div class="form-group">
+                    <label>Username</label>
+                    <input type="text" name="username" required placeholder="Username">
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" name="password" required placeholder="••••••••">
+                </div>
+                <div id="login-error" class="error-msg"></div>
+                <button type="submit" class="primary-btn login-btn">Sign In</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js" type="module"></script>
+    <script>
+        // Initialize Lucide icons
+        lucide.createIcons();
+    </script>
+</body>
+</html>

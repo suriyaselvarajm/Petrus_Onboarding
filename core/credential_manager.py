@@ -29,7 +29,7 @@ class CredentialManager:
             CLIENT_ID, 
             authority=AUTHORITY,
             token_cache=self._load_cache(),
-            enable_broker_on_windows=True
+            enable_broker_on_windows=False # Disable broker for more reliable browser-based login
         )
 
     def _load_cache(self) -> msal.SerializableTokenCache:
@@ -68,9 +68,19 @@ class CredentialManager:
         Open native Windows dialog for interactive login (WAM).
         This eliminates the need for a browser tab and closes automatically.
         """
+        if parent_window_handle is None:
+            # For console applications/servers started from terminal, use the console handle
+            parent_window_handle = msal.PublicClientApplication.CONSOLE_WINDOW_HANDLE
+            
+        # Custom success page that tries to close the tab or redirect back
+        # Removed indentation to prevent potential issues with some browser interpretations
+        success_tpl = "<html><body style=\"font-family:sans-serif;background:#0f172a;color:white;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;\"><div style=\"background:#1e293b;padding:32px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);text-align:center;\"><div style=\"font-size:40px;margin-bottom:16px;\">✅</div><h2 style=\"margin:0 0 8px 0;\">Signed In</h2><p style=\"color:#94a3b8;font-size:0.9rem;\">This window will close automatically.</p></div><script>setTimeout(function(){ window.location.href='http://localhost:8000'; setTimeout(function(){ window.close(); }, 300); }, 500);</script></body></html>"
+
         result = self._app.acquire_token_interactive(
             scopes=scopes,
-            parent_window_handle=parent_window_handle
+            parent_window_handle=parent_window_handle,
+            prompt="select_account",
+            success_template=success_tpl
         )
         self._save_cache(self._app.token_cache)
         return result

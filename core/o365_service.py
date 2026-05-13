@@ -43,9 +43,7 @@ class O365Service:
     # ── Auth ──────────────────────────────────────────────────────────────────
 
     def _token_valid(self) -> bool:
-        # If last attempt failed recently, don't try again to avoid spamming prompts
-        if self._last_auth_fail and time.time() - self._last_auth_fail < 30:
-            return True # Pretend it's valid to skip the call
+        """Check if the current token is still valid."""
         return bool(self._token) and time.time() < self._token_expiry - 60
 
     def _refresh_token(self) -> None:
@@ -104,7 +102,7 @@ class O365Service:
             if r.status_code == 200:
                 return True, r.json().get("userPrincipalName", "Connected")
             if r.status_code == 401:
-                return False, "Not authenticated — run 'az login'"
+                return False, "Not authenticated — please sign in to M365"
             return False, f"HTTP {r.status_code}"
         except Exception as e:
             return False, str(e)
@@ -449,10 +447,12 @@ class O365Service:
             "state":            data.get("state", "Tamil Nadu"),
             "postalCode":       data.get("zip", "641006"),
             "country":          data.get("country", "India"),
-            "companyName":      COMPANY_NAME,
-            "employeeId":       emp_id,
-            "employeeType":     data.get("employee_type", "Employee"),
+            "companyName":      "Petrus Technologies Pvt Ltd.",
+            "employeeId":       data.get("emp_id", ""),
+            "employeeType":     data.get("emp_type", "Full Time"),
             "usageLocation":    "IN",
+            "onPremisesImmutableId": data.get("emp_id", ""), 
+            "otherMails": [ f"{data.get('emp_id')}@petrustechnologies.com" ]
         }
 
         # Hire date (ISO 8601) — only if provided

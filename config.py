@@ -13,9 +13,6 @@ APP_VERSION = "1.0.0"
 COMPANY_NAME = "Petrus Technologies Pvt Ltd."
 EMAIL_DOMAIN = "petrustechnologies.com"
 
-# ── SharePoint Logging ────────────────────────────────────────────────────────
-# Sharing URL for the Excel file containing on-boarding and off-boarding sheets.
-SHAREPOINT_FILE_URL = "https://petrustechnologies-my.sharepoint.com/:x:/p/suriya_selvaraj/IQB1AofNsdKzQbWq6rSO163yAXjee8nf0mkKz2Y2VE9_Hto?e=FgmPAQ"
 
 # Optional: Hardcoded IDs for fallback if URL resolution fails
 # These can be found in the Graph API response of a successful resolution.
@@ -38,13 +35,31 @@ AD_ADMIN_USER     = ""
 AD_ADMIN_PASSWORD = ""
 
 # ── Default Field Values ──────────────────────────────────────────────────────
+# ── Office Locations ──────────────────────────────────────────────────────────
+OFFICE_LOCATIONS = {
+    "Coimbatore": {
+        "street": "511, Sathy Rd, Sivasakthi Colony, Ganapathy",
+        "city": "Coimbatore",
+        "state": "Tamil Nadu",
+        "zip": "641006",
+        "country": "India"
+    },
+    "Bangalore": {
+        "street": "E-101 & 102 1st Floor, No 22, Sunrise Chamber, Ulsoor Road",
+        "city": "Bengaluru",
+        "state": "Karnataka",
+        "zip": "560042",
+        "country": "India"
+    }
+}
+
+DEFAULT_OFFICE       = "Coimbatore"
 DEFAULT_CITY         = "Coimbatore"
 DEFAULT_STATE        = "Tamil Nadu"
 DEFAULT_ZIP          = "641006"
 DEFAULT_COUNTRY      = "India"
-DEFAULT_COUNTRY_CODE = 91          # ISO 3166-1 numeric for India
-DEFAULT_STREET       = "511, Sathy Rd, Sivasakthi Colony, Ganapathy"
-DEFAULT_OFFICE       = "Coimbatore"
+DEFAULT_COUNTRY_CODE = "91"
+DEFAULT_STREET       = ""
 
 # ── Dropdowns / Picklists ─────────────────────────────────────────────────────
 LICENSE_OPTIONS = [
@@ -92,6 +107,7 @@ MFA_RETRY_COUNT = 3         # Number of attempts for MFA enablement
 # Base path for security groups shown in the AD selection
 # We search recursively under Petrus-Users to ensure all groups are found
 AD_GROUPS_BASE_OU = "OU=Petrus-Users,DC=petrus,DC=local"
+AD_USERS_BASE_OU  = "OU=Petrus-Users,DC=petrus,DC=local"
 
 # ── Email Notification ────────────────────────────────────────────────────────
 DEFAULT_EMAIL_SENDER = "itsupport@petrustechnologies.com"

@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 from config import (
     AD_DOMAIN, AD_SERVER, AD_BASE_DN, AD_PETRUS_USERS_OU,
-    COMPANY_NAME, DEFAULT_COUNTRY_CODE,
+    COMPANY_NAME,
     AD_ADMIN_USER, AD_ADMIN_PASSWORD,
 )
 
@@ -54,15 +54,18 @@ class ADService:
 
     # ── Connection ────────────────────────────────────────────────────────────
 
+    def reconnect(self):
+        """Refresh configuration from settings manager."""
+        self._server_address = sm.get("ad_server") or sm.get("ad_domain") or AD_DOMAIN
+        self._connected = False
+
     def test_connection(self) -> Tuple[bool, str]:
-        if not (self._session_user or AD_ADMIN_USER):
-            return False, "Authentication required"
         try:
             with self._get_connection() as conn:
                 self._connected = True
-                return True, "Connected"
+                return True, "Connected successfully"
         except Exception as e:
-            return False, str(e)
+            return False, f"Connection failed: {str(e)}"
 
     def authenticate_and_check_permission(self, username: str, password: str) -> Tuple[bool, str]:
         """Verify credentials and check 'Domain Admins' membership via LDAPS."""
@@ -76,6 +79,13 @@ class ADService:
                 domain = sm.get("ad_domain") or AD_DOMAIN
                 auth_user = f"{username}@{domain}"
             
+            # Extract sAMAccountName from domain\user or user@domain
+            sam_name = username
+            if "\\" in username:
+                sam_name = username.split("\\")[-1]
+            elif "@" in username:
+                sam_name = username.split("@")[0]
+
             # Use SIMPLE authentication
             with Connection(server, user=auth_user, password=password, authentication=ldap3.SIMPLE) as conn:
                 if not conn.bind():
@@ -84,24 +94,36 @@ class ADService:
                 # Check group membership
                 conn.search(
                     search_base=AD_BASE_DN,
-                    search_filter=f'(&(objectClass=user)(sAMAccountName={username}))',
-                    attributes=['memberOf', 'distinguishedName']
+                    search_filter=f'(&(objectClass=user)(sAMAccountName={sam_name}))',
+                    attributes=['memberOf', 'distinguishedName', 'primaryGroupID']
                 )
                 if not conn.entries:
                     return False, "User not found in directory"
                 
                 user_entry = conn.entries[0]
                 groups = user_entry.memberOf.value if 'memberOf' in user_entry else []
-                is_admin = any('CN=Domain Admins' in g for g in groups)
+                if isinstance(groups, str): groups = [groups]
+                
+                # RID 512 is the 'Domain Admins' group
+                primary_group_id = str(user_entry.primaryGroupID.value) if 'primaryGroupID' in user_entry else ""
+                
+                print(f"[DEBUG] User {username} groups: {groups}, PrimaryGroupID: {primary_group_id}")
+                
+                # Check memberOf or primaryGroupID
+                is_admin = any('cn=domain admins' in g.lower() for g in groups) or (primary_group_id == "512")
                 
                 if is_admin:
+                    print(f"[DEBUG] User {username} is verified as Domain Admin")
                     # Save these credentials for the current session
                     self._session_user = username
                     self._session_password = password
                     self._connected = True
                     return True, "Authenticated and verified as Domain Admin"
+                
+                print(f"[DEBUG] User {username} NOT found in Domain Admins")
                 return False, "User authenticated but is not a member of 'Domain Admins'"
         except Exception as e:
+            print(f"[DEBUG] Auth error: {str(e)}")
             return False, f"Error checking permissions: {str(e)}"
 
     def check_ad_sync(self) -> Tuple[bool, str]:
@@ -235,11 +257,15 @@ class ADService:
             'postalCode': data.get("zip", "641006"),
             'c': 'IN',
             'co': 'India',
-            'countryCode': int(DEFAULT_COUNTRY_CODE),
-            'company': COMPANY_NAME,
-            'employeeID': data.get("employee_id", ""),
-            'employeeNumber': data.get("employee_id", ""),
-            'userAccountControl': '514' # Create disabled first to avoid 'unwillingToPerform' on Port 389
+            'countryCode': 91,
+            'company': 'Petrus Technologies Pvt Ltd.',
+            'employeeID': data.get("emp_id", ""),
+            'employeeNumber': data.get("emp_id", ""),
+            'userAccountControl': '514', # Create disabled first
+            'proxyAddresses': [
+                f"SMTP:{email}",
+                f"smtp:{data.get('emp_id')}@petrustechnologies.com"
+            ]
         }
         
         if manager_dn:
@@ -326,18 +352,28 @@ class ADService:
                     search_base=AD_BASE_DN,
                     search_filter=(
                         f'(&(objectClass=user)(objectCategory=person)'
-                        f'(|(displayName=*{query}*)(sAMAccountName=*{query}*)(mail=*{query}*)))'
+                        f'(|(displayName=*{query}*)(sAMAccountName=*{query}*)(mail=*{query}*)(userPrincipalName=*{query}*)(proxyAddresses=*{query}*)))'
                     ),
                     search_scope=SUBTREE,
                     attributes=['displayName', 'sAMAccountName', 'mail', 'title',
                                 'department', 'telephoneNumber', 'mobile',
-                                'manager', 'distinguishedName', 'userPrincipalName', 'employeeID']
+                                'manager', 'distinguishedName', 'userPrincipalName', 'employeeID', 'userAccountControl']
                 )
                 results = []
                 for e in conn.entries:
                     def _v(attr, _e=e):
                         try: return getattr(_e, attr).value or ""
                         except Exception: return ""
+                    
+                    uac = _v("userAccountControl")
+                    status = "Active"
+                    if uac:
+                        try:
+                            # 2 = Account Disabled
+                            if int(uac) & 2:
+                                status = "Disabled"
+                        except: pass
+
                     manager_dn   = _v("manager")
                     manager_name = ""
                     if manager_dn:
@@ -359,6 +395,7 @@ class ADService:
                         "distinguishedName": _v("distinguishedName"),
                         "userPrincipalName": _v("userPrincipalName"),
                         "employeeID":        _v("employeeID"),
+                        "status":            status
                     })
                 return results
         except Exception as e:
